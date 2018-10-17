@@ -14,6 +14,7 @@
 
 #include "resolve-names.h"
 #include "attr.h"
+#include "default-kinds.h"
 #include "mod-file.h"
 #include "rewrite-parse-tree.h"
 #include "scope.h"
@@ -43,10 +44,14 @@ static GenericSpec MapGenericSpec(const parser::GenericSpec &);
 // When inheritFromParent is set, defaults come from the parent rules.
 class ImplicitRules {
 public:
-  ImplicitRules(MessageHandler &messages)
-    : messages_{messages}, inheritFromParent_{false} {}
-  ImplicitRules(std::unique_ptr<ImplicitRules> &&parent)
-    : messages_{parent->messages_}, inheritFromParent_{true} {
+  ImplicitRules(
+      MessageHandler &messages, const IntrinsicTypeDefaultKinds &defaultKinds)
+    : messages_{messages}, inheritFromParent_{false}, defaultKinds_{
+                                                          defaultKinds} {}
+  ImplicitRules(std::unique_ptr<ImplicitRules> &&parent,
+      const IntrinsicTypeDefaultKinds &defaultKinds)
+    : messages_{parent->messages_}, inheritFromParent_{true},
+      defaultKinds_{defaultKinds} {
     parent_.swap(parent);
   }
   std::unique_ptr<ImplicitRules> &&parent() { return std::move(parent_); }
@@ -71,6 +76,7 @@ private:
   bool inheritFromParent_;  // look in parent if not specified here
   // map initial character of identifier to nullptr or its default type
   std::map<char, const DeclTypeSpec> map_;
+  const IntrinsicTypeDefaultKinds &defaultKinds_;
 
   friend std::ostream &operator<<(std::ostream &, const ImplicitRules &);
   friend void ShowImplicitRule(std::ostream &, const ImplicitRules &, char);
@@ -143,6 +149,8 @@ protected:
 // Find and create types from declaration-type-spec nodes.
 class DeclTypeSpecVisitor : public AttrsVisitor {
 public:
+  explicit DeclTypeSpecVisitor(const IntrinsicTypeDefaultKinds &defaultKinds)
+    : defaultKinds_{defaultKinds} {}
   using AttrsVisitor::Post;
   using AttrsVisitor::Pre;
   bool Pre(const parser::IntegerTypeSpec &);
@@ -163,6 +171,10 @@ public:
   bool Pre(const parser::TypeGuardStmt &);
   void Post(const parser::TypeGuardStmt &);
 
+  const IntrinsicTypeDefaultKinds &defaultKinds() const {
+    return defaultKinds_;
+  }
+
 protected:
   std::unique_ptr<DeclTypeSpec> &GetDeclTypeSpec();
   void BeginDeclTypeSpec();
@@ -175,6 +187,7 @@ private:
   std::unique_ptr<DeclTypeSpec> declTypeSpec_;
   DerivedTypeSpec *derivedTypeSpec_{nullptr};
   std::unique_ptr<ParamValue> typeParamValue_;
+  const IntrinsicTypeDefaultKinds &defaultKinds_;
 
   void MakeIntrinsic(TypeCategory, int);
   void SetDeclTypeSpec(const DeclTypeSpec &declTypeSpec);
@@ -229,6 +242,8 @@ private:
 // Visit ImplicitStmt and related parse tree nodes and updates implicit rules.
 class ImplicitRulesVisitor : public DeclTypeSpecVisitor, public MessageHandler {
 public:
+  explicit ImplicitRulesVisitor(const IntrinsicTypeDefaultKinds &defaultKinds)
+    : DeclTypeSpecVisitor{defaultKinds} {}
   using DeclTypeSpecVisitor::Post;
   using DeclTypeSpecVisitor::Pre;
   using MessageHandler::Post;
@@ -257,7 +272,7 @@ protected:
 private:
   // implicit rules in effect for current scope
   std::unique_ptr<ImplicitRules> implicitRules_{
-      std::make_unique<ImplicitRules>(*this)};
+      std::make_unique<ImplicitRules>(*this, defaultKinds())};
   const SourceName *prevImplicit_{nullptr};
   const SourceName *prevImplicitNone_{nullptr};
   const SourceName *prevImplicitNoneType_{nullptr};
@@ -305,6 +320,9 @@ private:
 // Manage a stack of Scopes
 class ScopeHandler : public ImplicitRulesVisitor {
 public:
+  explicit ScopeHandler(const IntrinsicTypeDefaultKinds &defaultKinds)
+    : ImplicitRulesVisitor(defaultKinds) {}
+
   Scope &currScope() { return *currScope_; }
   // The enclosing scope, skipping blocks and derived types.
   Scope &InclusiveScope();
@@ -343,8 +361,7 @@ public:
           derivedType = &currScope().MakeSymbol(name, attrs, details);
           d->set_derivedType(*derivedType);
         } else {
-          Say2(name, "'%s' is already declared in this scoping unit"_err_en_US,
-              derivedType->name(), "Previous declaration of '%s'"_en_US);
+          SayAlreadyDeclared(name, *derivedType);
         }
         return *derivedType;
       }
@@ -398,6 +415,9 @@ private:
 
 class ModuleVisitor : public virtual ScopeHandler {
 public:
+  explicit ModuleVisitor(const IntrinsicTypeDefaultKinds &defaultKinds)
+    : ScopeHandler{defaultKinds} {}
+
   bool Pre(const parser::Module &);
   void Post(const parser::Module &);
   bool Pre(const parser::Submodule &);
@@ -437,6 +457,9 @@ private:
 
 class InterfaceVisitor : public virtual ScopeHandler {
 public:
+  explicit InterfaceVisitor(const IntrinsicTypeDefaultKinds &defaultKinds)
+    : ScopeHandler{defaultKinds} {}
+
   bool Pre(const parser::InterfaceStmt &);
   void Post(const parser::InterfaceStmt &);
   void Post(const parser::EndInterfaceStmt &);
@@ -466,9 +489,12 @@ private:
   void ResolveSpecificsInGeneric(Symbol &generic);
 };
 
-class SubprogramVisitor : public InterfaceVisitor {
+class SubprogramVisitor : public virtual ScopeHandler, public InterfaceVisitor {
 public:
-  bool Pre(const parser::StmtFunctionStmt &);
+  explicit SubprogramVisitor(const IntrinsicTypeDefaultKinds &defaultKinds)
+    : ScopeHandler{defaultKinds}, InterfaceVisitor{defaultKinds} {}
+
+  bool HandleStmtFunction(const parser::StmtFunctionStmt &);
   void Post(const parser::StmtFunctionStmt &);
   bool Pre(const parser::SubroutineStmt &);
   void Post(const parser::SubroutineStmt &);
@@ -503,11 +529,15 @@ private:
 class DeclarationVisitor : public ArraySpecVisitor,
                            public virtual ScopeHandler {
 public:
+  explicit DeclarationVisitor(const IntrinsicTypeDefaultKinds &defaultKinds)
+    : ScopeHandler{defaultKinds} {}
+
   using ArraySpecVisitor::Post;
   using ArraySpecVisitor::Pre;
 
   void Post(const parser::EntityDecl &);
   void Post(const parser::ObjectDecl &);
+  void Post(const parser::PointerDecl &);
 
   bool Pre(const parser::BindStmt &) { return BeginAttrs(); }
   void Post(const parser::BindStmt &) { EndAttrs(); }
@@ -584,6 +614,7 @@ private:
 
   bool HandleAttributeStmt(Attr, const std::list<parser::Name> &);
   Symbol &HandleAttributeStmt(Attr, const SourceName &);
+  void DeclareUnknownEntity(const SourceName &, Attrs);
   void DeclareObjectEntity(const SourceName &, Attrs);
   void DeclareProcEntity(const SourceName &, Attrs, const ProcInterface &);
   void SetType(const SourceName &, Symbol &, const DeclTypeSpec &);
@@ -631,13 +662,71 @@ private:
   }
 };
 
+// Check that construct names don't conflict with other names.
+class ConstructNamesVisitor : public virtual ScopeHandler {
+public:
+  explicit ConstructNamesVisitor(const IntrinsicTypeDefaultKinds &defaultKinds)
+    : ScopeHandler{defaultKinds} {}
+
+  // Definitions of construct names
+  bool Pre(const parser::WhereConstructStmt &x) { return CheckDef(x.t); }
+  bool Pre(const parser::ForallConstructStmt &x) { return CheckDef(x.t); }
+  bool Pre(const parser::AssociateStmt &x) { return CheckDef(x.t); }
+  bool Pre(const parser::BlockStmt &x) { return CheckDef(x.v); }
+  bool Pre(const parser::ChangeTeamStmt &x) { return CheckDef(x.t); }
+  bool Pre(const parser::CriticalStmt &x) { return CheckDef(x.t); }
+  bool Pre(const parser::LabelDoStmt &x) { return CheckDef(x.t); }
+  bool Pre(const parser::NonLabelDoStmt &x) { return CheckDef(x.t); }
+  bool Pre(const parser::IfThenStmt &x) { return CheckDef(x.t); }
+  bool Pre(const parser::SelectCaseStmt &x) { return CheckDef(x.t); }
+  bool Pre(const parser::SelectRankStmt &x) {
+    return CheckDef(std::get<0>(x.t));
+  }
+  bool Pre(const parser::SelectTypeStmt &x) {
+    return CheckDef(std::get<0>(x.t));
+  }
+  // References to construct names
+  void Post(const parser::MaskedElsewhereStmt &x) { CheckRef(x.t); }
+  void Post(const parser::ElsewhereStmt &x) { CheckRef(x.v); }
+  void Post(const parser::EndWhereStmt &x) { CheckRef(x.v); }
+  void Post(const parser::EndForallStmt &x) { CheckRef(x.v); }
+  void Post(const parser::EndAssociateStmt &x) { CheckRef(x.v); }
+  void Post(const parser::EndBlockStmt &x) { CheckRef(x.v); }
+  void Post(const parser::EndChangeTeamStmt &x) { CheckRef(x.t); }
+  void Post(const parser::EndCriticalStmt &x) { CheckRef(x.v); }
+  void Post(const parser::EndDoStmt &x) { CheckRef(x.v); }
+  void Post(const parser::ElseIfStmt &x) { CheckRef(x.t); }
+  void Post(const parser::ElseStmt &x) { CheckRef(x.v); }
+  void Post(const parser::EndIfStmt &x) { CheckRef(x.v); }
+  void Post(const parser::CaseStmt &x) { CheckRef(x.t); }
+  void Post(const parser::EndSelectStmt &x) { CheckRef(x.v); }
+  void Post(const parser::SelectRankCaseStmt &x) { CheckRef(x.t); }
+  void Post(const parser::TypeGuardStmt &x) { CheckRef(x.t); }
+  void Post(const parser::CycleStmt &x) { CheckRef(x.v); }
+  void Post(const parser::ExitStmt &x) { CheckRef(x.v); }
+
+private:
+  template<typename T> bool CheckDef(const T &t) {
+    return CheckDef(std::get<std::optional<parser::Name>>(t));
+  }
+  template<typename T> void CheckRef(const T &t) {
+    CheckRef(std::get<std::optional<parser::Name>>(t));
+  }
+  bool CheckDef(const std::optional<parser::Name> &);
+  void CheckRef(const std::optional<parser::Name> &);
+};
+
 // Walk the parse tree and resolve names to symbols.
-class ResolveNamesVisitor : public ModuleVisitor,
+class ResolveNamesVisitor : public virtual ScopeHandler,
+                            public ModuleVisitor,
                             public SubprogramVisitor,
-                            public DeclarationVisitor {
+                            public DeclarationVisitor,
+                            public ConstructNamesVisitor {
 public:
   using ArraySpecVisitor::Post;
   using ArraySpecVisitor::Pre;
+  using ConstructNamesVisitor::Post;
+  using ConstructNamesVisitor::Pre;
   using DeclarationVisitor::Post;
   using DeclarationVisitor::Pre;
   using ImplicitRulesVisitor::Post;
@@ -649,7 +738,13 @@ public:
   using SubprogramVisitor::Post;
   using SubprogramVisitor::Pre;
 
-  ResolveNamesVisitor(Scope &rootScope) { PushScope(rootScope); }
+  ResolveNamesVisitor(
+      Scope &rootScope, const IntrinsicTypeDefaultKinds &defaultKinds)
+    : ScopeHandler{defaultKinds}, ModuleVisitor{defaultKinds},
+      SubprogramVisitor{defaultKinds}, DeclarationVisitor{defaultKinds},
+      ConstructNamesVisitor{defaultKinds} {
+    PushScope(rootScope);
+  }
 
   // Default action for a parse tree node is to visit children.
   template<typename T> bool Pre(const T &) { return true; }
@@ -665,42 +760,32 @@ public:
   bool Pre(const parser::BlockStmt &);
   bool Pre(const parser::EndBlockStmt &);
   bool Pre(const parser::ImplicitStmt &);
-
-  void Post(const parser::AllocateObject &x) {
-    CheckImplicitSymbol(std::get_if<parser::Name>(&x.u));
-  }
-  void Post(const parser::PointerAssignmentStmt &x) {
-    ResolveDataRef(std::get<parser::DataRef>(x.t));
-  }
-  void Post(const parser::Expr &x) { CheckImplicitSymbol(GetVariableName(x)); }
-  void Post(const parser::Variable &x) {
-    CheckImplicitSymbol(GetVariableName(x));
-  }
-  template<typename T> void Post(const parser::LoopBounds<T> &x) {
-    CheckImplicitSymbol(&x.name.thing.thing);
-  }
-  bool Pre(const parser::StructureComponent &);
+  void Post(const parser::PointerObject &);
+  void Post(const parser::AllocateObject &);
+  void Post(const parser::PointerAssignmentStmt &);
+  void Post(const parser::Designator &);
+  template<typename T> void Post(const parser::LoopBounds<T> &);
+  void Post(const parser::ConcurrentControl &);
+  void Post(const parser::ProcComponentRef &);
   void Post(const parser::ProcedureDesignator &);
   bool Pre(const parser::FunctionReference &);
   void Post(const parser::FunctionReference &);
   bool Pre(const parser::CallStmt &);
   void Post(const parser::CallStmt &);
   bool Pre(const parser::ImportStmt &);
+  void Post(const parser::TypeGuardStmt &);
+  bool Pre(const parser::StmtFunctionStmt &);
 
 private:
   // Kind of procedure we are expecting to see in a ProcedureDesignator
   std::optional<Symbol::Flag> expectedProcFlag_;
   const SourceName *prevImportStmt_{nullptr};
 
-  const parser::Name *GetVariableName(const parser::DataRef &);
-  const parser::Name *GetVariableName(const parser::Designator &);
-  const parser::Name *GetVariableName(const parser::Expr &);
-  const parser::Name *GetVariableName(const parser::Variable &);
-  const Symbol *CheckImplicitSymbol(const parser::Name *);
   Symbol *ResolveStructureComponent(const parser::StructureComponent &);
   Symbol *ResolveArrayElement(const parser::ArrayElement &);
   Symbol *ResolveCoindexedNamedObject(const parser::CoindexedNamedObject &);
   Symbol *ResolveDataRef(const parser::DataRef &);
+  Symbol *ResolveName(const SourceName &);
   Symbol *FindComponent(Symbol &, const SourceName &);
   Symbol *FindComponent(const Scope &, const SourceName &);
   bool CheckAccessibleComponent(const Symbol &);
@@ -736,9 +821,11 @@ std::optional<const DeclTypeSpec> ImplicitRules::GetType(char ch) const {
   } else if (inheritFromParent_) {
     return parent_->GetType(ch);
   } else if (ch >= 'i' && ch <= 'n') {
-    return DeclTypeSpec{IntrinsicTypeSpec{TypeCategory::Integer}};
+    return DeclTypeSpec{IntrinsicTypeSpec{TypeCategory::Integer,
+        defaultKinds_.GetDefaultKind(TypeCategory::Integer)}};
   } else if (ch >= 'a' && ch <= 'z') {
-    return DeclTypeSpec{IntrinsicTypeSpec{TypeCategory::Real}};
+    return DeclTypeSpec{IntrinsicTypeSpec{
+        TypeCategory::Real, defaultKinds_.GetDefaultKind(TypeCategory::Real)}};
   } else {
     return std::nullopt;
   }
@@ -872,6 +959,7 @@ bool DeclTypeSpecVisitor::Pre(const parser::DeclarationTypeSpec::Record &x) {
 
 void DeclTypeSpecVisitor::Post(const parser::StructureConstructor &) {
   // TODO: StructureConstructor
+  // TODO: name in derived type spec must be resolved
   derivedTypeSpec_ = nullptr;
 }
 bool DeclTypeSpecVisitor::Pre(const parser::AllocateStmt &) {
@@ -914,17 +1002,18 @@ bool DeclTypeSpecVisitor::Pre(const parser::IntrinsicTypeSpec::Complex &x) {
 }
 bool DeclTypeSpecVisitor::Pre(
     const parser::IntrinsicTypeSpec::DoublePrecision &) {
-  MakeIntrinsic(TypeCategory::Real,
-      2 * IntrinsicTypeSpec::GetDefaultKind(TypeCategory::Real));
+  MakeIntrinsic(TypeCategory::Real, defaultKinds().doublePrecisionKind());
   return false;
 }
 bool DeclTypeSpecVisitor::Pre(
     const parser::IntrinsicTypeSpec::DoubleComplex &) {
-  MakeIntrinsic(TypeCategory::Complex,
-      2 * IntrinsicTypeSpec::GetDefaultKind(TypeCategory::Complex));
+  MakeIntrinsic(TypeCategory::Complex, defaultKinds().doublePrecisionKind());
   return false;
 }
 void DeclTypeSpecVisitor::MakeIntrinsic(TypeCategory category, int kind) {
+  if (kind == 0) {
+    kind = defaultKinds_.GetDefaultKind(category);
+  }
   SetDeclTypeSpec(DeclTypeSpec{IntrinsicTypeSpec{category, kind}});
 }
 
@@ -1057,7 +1146,8 @@ void ImplicitRulesVisitor::Post(const parser::ImplicitSpec &) {
 }
 
 void ImplicitRulesVisitor::PushScope() {
-  implicitRules_ = std::make_unique<ImplicitRules>(std::move(implicitRules_));
+  implicitRules_ = std::make_unique<ImplicitRules>(
+      std::move(implicitRules_), defaultKinds());
   prevImplicit_ = nullptr;
   prevImplicitNone_ = nullptr;
   prevImplicitNoneType_ = nullptr;
@@ -1232,15 +1322,26 @@ void ScopeHandler::EraseSymbol(const SourceName &name) {
   currScope().erase(name);
 }
 
+static bool NeedsType(const Symbol &symbol) {
+  if (symbol.GetType()) {
+    return false;
+  }
+  if (auto *details{symbol.detailsIf<ProcEntityDetails>()}) {
+    if (details->interface().symbol()) {
+      return false;  // the interface determines the type
+    }
+    if (!symbol.test(Symbol::Flag::Function)) {
+      return false;  // not known to be a function
+    }
+  }
+  return true;
+}
 void ScopeHandler::ApplyImplicitRules(Symbol &symbol) {
   ConvertToObjectEntity(symbol);
-  if (symbol.GetType()) {
-    // already has a type
-  } else if (symbol.has<ProcEntityDetails>() &&
-      !symbol.test(Symbol::Flag::Function)) {
-    // a procedure that is not known to be a function
-  } else if (const auto type{GetImplicitType(symbol)}) {
-    symbol.SetType(*type);
+  if (NeedsType(symbol)) {
+    if (const auto type{GetImplicitType(symbol)}) {
+      symbol.SetType(*type);
+    }
   }
 }
 std::optional<const DeclTypeSpec> ScopeHandler::GetImplicitType(
@@ -1393,8 +1494,14 @@ void ModuleVisitor::AddUse(const SourceName &location,
     }
   } else if (auto *details{localSymbol.detailsIf<UseErrorDetails>()}) {
     details->add_occurrence(location, *useModuleScope_);
+  } else if (!localSymbol.has<UnknownDetails>()) {
+    auto name{localName.ToString()};
+    Say(location,
+        "Cannot use-associate '%s'; it is already declared in this scope"_err_en_US,
+        name.c_str())
+        .Attach(localSymbol.name(), "Previous declaration of '%s'"_en_US,
+            name.c_str());
   } else {
-    CHECK(localSymbol.has<UnknownDetails>());
     localSymbol.set_details(UseDetails{location, useSymbol});
   }
 }
@@ -1464,7 +1571,7 @@ Symbol &ModuleVisitor::BeginModule(const SourceName &name, bool isSubmodule,
 // May have to read a .mod file to find it.
 // If an error occurs, report it and return nullptr.
 Scope *ModuleVisitor::FindModule(const SourceName &name, Scope *ancestor) {
-  ModFileReader reader{searchDirectories_};
+  ModFileReader reader{searchDirectories_, defaultKinds()};
   auto *scope{reader.Read(GlobalScope(), name, ancestor)};
   if (!scope) {
     Annex(std::move(reader.errors()));
@@ -1696,23 +1803,28 @@ void InterfaceVisitor::CheckGenericProcedures(Symbol &generic) {
 
 // SubprogramVisitor implementation
 
-bool SubprogramVisitor::Pre(const parser::StmtFunctionStmt &x) {
+void SubprogramVisitor::Post(const parser::StmtFunctionStmt &x) {
+  if (badStmtFuncFound_) {
+    return;  // This wasn't really a stmt function so no scope was created
+  }
+  PopScope();
+}
+// Return false if it is actually an assignment statement.
+bool SubprogramVisitor::HandleStmtFunction(const parser::StmtFunctionStmt &x) {
   const auto &name{std::get<parser::Name>(x.t)};
   std::optional<SourceName> occurrence;
   std::optional<DeclTypeSpec> resultType;
   // Look up name: provides return type or tells us if it's an array
   if (auto *symbol{FindSymbol(name.source)}) {
-    if (auto *details{symbol->detailsIf<EntityDetails>()}) {
-      // TODO: check that attrs are compatible with stmt func
-      resultType = details->type();
-      occurrence = symbol->name();
-      EraseSymbol(symbol->name());
-    } else if (symbol->has<ObjectEntityDetails>()) {
-      // not a stmt-func at all but an array; do nothing
-      symbol->add_occurrence(name.source);
+    auto *details{symbol->detailsIf<EntityDetails>()};
+    if (!details) {
       badStmtFuncFound_ = true;
-      return true;
+      return false;
     }
+    // TODO: check that attrs are compatible with stmt func
+    resultType = details->type();
+    occurrence = symbol->name();
+    EraseSymbol(symbol->name());
   }
   if (badStmtFuncFound_) {
     Say(name, "'%s' has not been declared as an array"_err_en_US);
@@ -1742,13 +1854,6 @@ bool SubprogramVisitor::Pre(const parser::StmtFunctionStmt &x) {
   }
   details.set_result(MakeSymbol(name, resultDetails));
   return true;
-}
-
-void SubprogramVisitor::Post(const parser::StmtFunctionStmt &x) {
-  if (badStmtFuncFound_) {
-    return;  // This wasn't really a stmt function so no scope was created
-  }
-  PopScope();
 }
 
 bool SubprogramVisitor::Pre(const parser::Suffix &suffix) {
@@ -1962,17 +2067,12 @@ void DeclarationVisitor::Post(const parser::EntityDecl &x) {
   const auto &name{std::get<parser::ObjectName>(x.t).source};
   // TODO: CoarraySpec, CharLength, Initialization
   Attrs attrs{attrs_ ? *attrs_ : Attrs{}};
-  if (!arraySpec().empty()) {
-    DeclareObjectEntity(name, attrs);
-  } else {
-    Symbol &symbol{DeclareEntity<EntityDetails>(name, attrs)};
-    if (auto &type{GetDeclTypeSpec()}) {
-      SetType(name, symbol, *type);
-    }
-    if (symbol.attrs().test(Attr::EXTERNAL)) {
-      ConvertToProcEntity(symbol);
-    }
-  }
+  DeclareUnknownEntity(name, attrs);
+}
+
+void DeclarationVisitor::Post(const parser::PointerDecl &x) {
+  const auto &name{std::get<parser::Name>(x.t).source};
+  DeclareUnknownEntity(name, Attrs{Attr::POINTER});
 }
 
 bool DeclarationVisitor::Pre(const parser::BindEntity &x) {
@@ -2061,6 +2161,22 @@ void DeclarationVisitor::Post(const parser::ObjectDecl &x) {
   CHECK(objectDeclAttr_.has_value());
   const auto &name{std::get<parser::ObjectName>(x.t)};
   DeclareObjectEntity(name.source, Attrs{*objectDeclAttr_});
+}
+
+// Declare an entity not yet known to be an object or proc.
+void DeclarationVisitor::DeclareUnknownEntity(
+    const SourceName &name, Attrs attrs) {
+  if (!arraySpec().empty()) {
+    DeclareObjectEntity(name, attrs);
+  } else {
+    Symbol &symbol{DeclareEntity<EntityDetails>(name, attrs)};
+    if (auto &type{GetDeclTypeSpec()}) {
+      SetType(name, symbol, *type);
+    }
+    if (symbol.attrs().test(Attr::EXTERNAL)) {
+      ConvertToProcEntity(symbol);
+    }
+  }
 }
 
 void DeclarationVisitor::DeclareProcEntity(
@@ -2459,6 +2575,22 @@ bool DeclarationVisitor::OkToAddComponent(
   }
 }
 
+// ConstructNamesVisitor implementation
+
+bool ConstructNamesVisitor::CheckDef(const std::optional<parser::Name> &x) {
+  if (x) {
+    MakeSymbol(*x, MiscDetails{MiscDetails::Kind::ConstructName});
+  }
+  return true;
+}
+
+void ConstructNamesVisitor::CheckRef(const std::optional<parser::Name> &x) {
+  if (x) {
+    // Just add an occurrence of this name; checking is done in ValidateLabels
+    FindSymbol(x->source);
+  }
+}
+
 // ResolveNamesVisitor implementation
 
 bool ResolveNamesVisitor::Pre(const parser::CommonBlockObject &x) {
@@ -2525,11 +2657,6 @@ bool ResolveNamesVisitor::Pre(const parser::ImportStmt &x) {
   return false;
 }
 
-bool ResolveNamesVisitor::Pre(const parser::StructureComponent &x) {
-  ResolveStructureComponent(x);
-  return false;
-}
-
 Symbol *ResolveNamesVisitor::ResolveStructureComponent(
     const parser::StructureComponent &x) {
   Symbol *dataRef{ResolveDataRef(x.base)};
@@ -2537,6 +2664,10 @@ Symbol *ResolveNamesVisitor::ResolveStructureComponent(
 }
 Symbol *ResolveNamesVisitor::ResolveArrayElement(
     const parser::ArrayElement &x) {
+  // TODO: need to resolve these
+  // for (auto &subscript : x.subscripts) {
+  //  ResolveSectionSubscript(subscript);
+  //}
   return ResolveDataRef(x.base);
 }
 Symbol *ResolveNamesVisitor::ResolveCoindexedNamedObject(
@@ -2547,20 +2678,7 @@ Symbol *ResolveNamesVisitor::ResolveCoindexedNamedObject(
 Symbol *ResolveNamesVisitor::ResolveDataRef(const parser::DataRef &x) {
   return std::visit(
       common::visitors{
-          [=](const parser::Name &y) {
-            auto *symbol{FindSymbol(y.source)};
-            if (!symbol) {
-              if (isImplicitNoneType()) {
-                Say(y.source, "No explicit type declared for '%s'"_err_en_US);
-              } else {
-                auto pair{InclusiveScope().try_emplace(y.source)};
-                CHECK(pair.second);
-                symbol = pair.first->second;
-                ApplyImplicitRules(*symbol);
-              }
-            }
-            return symbol;
-          },
+          [=](const parser::Name &y) { return ResolveName(y.source); },
           [=](const common::Indirection<parser::StructureComponent> &y) {
             return ResolveStructureComponent(*y);
           },
@@ -2572,6 +2690,31 @@ Symbol *ResolveNamesVisitor::ResolveDataRef(const parser::DataRef &x) {
           },
       },
       x.u);
+}
+
+// If implicit types are allowed, ensure name is in the symbol table.
+// Otherwise, report an error if it hasn't been declared.
+Symbol *ResolveNamesVisitor::ResolveName(const SourceName &name) {
+  if (auto *symbol{FindSymbol(name)}) {
+    if (CheckUseError(name, *symbol)) {
+      return nullptr;  // reported an error
+    }
+    return symbol;
+  }
+  if (isImplicitNoneType()) {
+    Say(name, "No explicit type declared for '%s'"_err_en_US);
+    return nullptr;
+  }
+  // Create the symbol then ensure it is accessible
+  InclusiveScope().try_emplace(name);
+  auto *symbol{FindSymbol(name)};
+  if (!symbol) {
+    Say(name,
+        "'%s' from host scoping unit is not accessible due to IMPORT"_err_en_US);
+    return nullptr;
+  }
+  ApplyImplicitRules(*symbol);
+  return symbol;
 }
 
 // base is a part-ref of a derived type; find the named component in its type.
@@ -2869,12 +3012,14 @@ bool ResolveNamesVisitor::Pre(const parser::MainProgram &x) {
 
 void ResolveNamesVisitor::Post(const parser::EndProgramStmt &) { PopScope(); }
 
-bool ResolveNamesVisitor::Pre(const parser::BlockStmt &) {
+bool ResolveNamesVisitor::Pre(const parser::BlockStmt &x) {
+  ConstructNamesVisitor::Pre(x);
   PushScope(Scope::Kind::Block, nullptr);
   return false;
 }
-bool ResolveNamesVisitor::Pre(const parser::EndBlockStmt &) {
+bool ResolveNamesVisitor::Pre(const parser::EndBlockStmt &x) {
   PopScope();
+  ConstructNamesVisitor::Post(x);
   return false;
 }
 bool ResolveNamesVisitor::Pre(const parser::ImplicitStmt &x) {
@@ -2884,81 +3029,64 @@ bool ResolveNamesVisitor::Pre(const parser::ImplicitStmt &x) {
   }
   return ImplicitRulesVisitor::Pre(x);
 }
-
-const parser::Name *ResolveNamesVisitor::GetVariableName(
-    const parser::DataRef &x) {
-  return std::visit(
+void ResolveNamesVisitor::Post(const parser::PointerObject &x) {
+  std::visit(
       common::visitors{
-          [](const parser::Name &x) { return &x; },
-          [&](const common::Indirection<parser::ArrayElement> &x) {
-            return GetVariableName(x->base);
-          },
-          [](const auto &) {
-            return static_cast<const parser::Name *>(nullptr);
+          [&](const parser::Name &x) { ResolveName(x.source); },
+          [&](const parser::StructureComponent &x) {
+            ResolveStructureComponent(x);
           },
       },
       x.u);
 }
-
-const parser::Name *ResolveNamesVisitor::GetVariableName(
-    const parser::Designator &x) {
-  return std::visit(
+void ResolveNamesVisitor::Post(const parser::AllocateObject &x) {
+  std::visit(
       common::visitors{
-          [](const parser::ObjectName &x) { return &x; },
-          [&](const parser::DataRef &x) { return GetVariableName(x); },
+          [&](const parser::Name &x) { ResolveName(x.source); },
+          [&](const parser::StructureComponent &x) {
+            ResolveStructureComponent(x);
+          },
+      },
+      x.u);
+}
+void ResolveNamesVisitor::Post(const parser::PointerAssignmentStmt &x) {
+  ResolveDataRef(std::get<parser::DataRef>(x.t));
+}
+void ResolveNamesVisitor::Post(const parser::Designator &x) {
+  std::visit(
+      common::visitors{
+          [&](const parser::ObjectName &x) { ResolveName(x.source); },
+          [&](const parser::DataRef &x) { ResolveDataRef(x); },
           [&](const parser::Substring &x) {
-            return GetVariableName(std::get<parser::DataRef>(x.t));
+            ResolveDataRef(std::get<parser::DataRef>(x.t));
+            // TODO: SubstringRange
           },
       },
       x.u);
 }
-const parser::Name *ResolveNamesVisitor::GetVariableName(
-    const parser::Expr &x) {
-  if (const auto *designator{
-          std::get_if<common::Indirection<parser::Designator>>(&x.u)}) {
-    return GetVariableName(**designator);
-  } else {
-    return nullptr;
-  }
+template<typename T>
+void ResolveNamesVisitor::Post(const parser::LoopBounds<T> &x) {
+  ResolveName(x.name.thing.thing.source);
 }
-const parser::Name *ResolveNamesVisitor::GetVariableName(
-    const parser::Variable &x) {
-  if (const auto *designator{
-          std::get_if<common::Indirection<parser::Designator>>(&x.u)}) {
-    return GetVariableName(**designator);
-  } else {
-    return nullptr;
-  }
+void ResolveNamesVisitor::Post(const parser::ProcComponentRef &x) {
+  ResolveStructureComponent(x.v.thing);
 }
-
-// If implicit types are allowed, ensure name is in the symbol table.
-// Otherwise, report an error if it hasn't been declared.
-const Symbol *ResolveNamesVisitor::CheckImplicitSymbol(
-    const parser::Name *name) {
-  if (!name) {
-    return nullptr;
-  }
-  if (const auto *symbol{FindSymbol(name->source)}) {
-    if (CheckUseError(name->source, *symbol) ||
-        !symbol->has<UnknownDetails>()) {
-      return nullptr;  // reported an error or symbol is declared
+void ResolveNamesVisitor::Post(const parser::TypeGuardStmt &x) {
+  DeclTypeSpecVisitor::Post(x);
+  ConstructNamesVisitor::Post(x);
+}
+bool ResolveNamesVisitor::Pre(const parser::StmtFunctionStmt &x) {
+  if (!HandleStmtFunction(x)) {
+    // This is an array element assignment: resolve names of indices
+    const auto &names{std::get<std::list<parser::Name>>(x.t)};
+    for (auto &name : names) {
+      ResolveName(name.source);
     }
-    return symbol;
   }
-  if (isImplicitNoneType()) {
-    Say(*name, "No explicit type declared for '%s'"_err_en_US);
-    return nullptr;
-  }
-  // Create the symbol then ensure it is accessible
-  InclusiveScope().try_emplace(name->source);
-  auto *symbol{FindSymbol(name->source)};
-  if (!symbol) {
-    Say(name->source,
-        "'%s' from host scoping unit is not accessible due to IMPORT"_err_en_US);
-    return nullptr;
-  }
-  ApplyImplicitRules(*symbol);
-  return symbol;
+  return true;
+}
+void ResolveNamesVisitor::Post(const parser::ConcurrentControl &x) {
+  ResolveName(std::get<parser::Name>(x.t).source);
 }
 
 void ResolveNamesVisitor::Post(const parser::Program &) {
@@ -2969,8 +3097,9 @@ void ResolveNamesVisitor::Post(const parser::Program &) {
 
 void ResolveNames(parser::Messages &messages, Scope &rootScope,
     const parser::Program &program,
-    const std::vector<std::string> &searchDirectories) {
-  ResolveNamesVisitor visitor{rootScope};
+    const std::vector<std::string> &searchDirectories,
+    const IntrinsicTypeDefaultKinds &defaultKinds) {
+  ResolveNamesVisitor visitor{rootScope, defaultKinds};
   for (auto &dir : searchDirectories) {
     visitor.add_searchDirectory(dir);
   }

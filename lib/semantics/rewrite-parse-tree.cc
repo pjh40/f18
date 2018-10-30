@@ -14,6 +14,7 @@
 
 #include "rewrite-parse-tree.h"
 #include "scope.h"
+#include "semantics.h"
 #include "symbol.h"
 #include "../common/indirection.h"
 #include "../parser/parse-tree-visitor.h"
@@ -82,7 +83,8 @@ private:
     }
     parser::Name *name{std::get_if<parser::Name>(
         &std::get<parser::ProcedureDesignator>((*funcRef)->v.t).u)};
-    if (!name || !name->symbol || !name->symbol->has<ObjectEntityDetails>()) {
+    if (!name || !name->symbol ||
+        !name->symbol->GetUltimate().has<ObjectEntityDetails>()) {
       return;
     }
     x.u = common::Indirection{(*funcRef)->ConvertToArrayElementRef()};
@@ -151,12 +153,10 @@ static void CollectSymbols(const Scope &scope, symbolMap &symbols) {
   }
 }
 
-void RewriteParseTree(
-    parser::Messages &messages, const Scope &scope, parser::Program &program) {
+void RewriteParseTree(SemanticsContext &context, parser::Program &program) {
   symbolMap symbols;
-  CollectSymbols(scope, symbols);
-  RewriteMutator mutator{messages, symbols};
+  CollectSymbols(context.globalScope(), symbols);
+  RewriteMutator mutator{context.messages(), symbols};
   parser::Walk(program, mutator);
 }
-
-}  // namespace Fortran::semantics
+}

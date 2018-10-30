@@ -63,7 +63,7 @@ constexpr MessageFixedText operator""_err_en_US(
     const char str[], std::size_t n) {
   return MessageFixedText{str, n, true /* fatal */};
 }
-}  // namespace literals
+}
 
 class MessageFormattedText {
 public:
@@ -150,9 +150,9 @@ public:
     attachment_ = c;
     attachmentIsContext_ = true;
   }
-  void Attach(Message *);
-  template<typename... A> void Attach(A &&... args) {
-    Attach(new Message{std::forward<A>(args)...});  // reference-counted
+  Message &Attach(Message *);
+  template<typename... A> Message &Attach(A &&... args) {
+    return Attach(new Message{std::forward<A>(args)...});  // reference-counted
   }
 
   bool SortBefore(const Message &that) const;
@@ -240,20 +240,30 @@ private:
 
 class ContextualMessages {
 public:
+  class SavedState {
+  public:
+    SavedState(ContextualMessages &, CharBlock);
+    ~SavedState();
+
+  private:
+    ContextualMessages &msgs_;
+    CharBlock at_;
+  };
+
   ContextualMessages(CharBlock at, Messages *m) : at_{at}, messages_{m} {}
-  ContextualMessages(CharBlock at, const ContextualMessages &context)
-    : at_{at}, messages_{context.messages_} {}
 
   CharBlock at() const { return at_; }
   Messages *messages() const { return messages_; }
+
+  // Set CharBlock for messages; restore when the returned value is deleted
+  SavedState SetLocation(const CharBlock &);
 
   template<typename... A> void Say(A &&... args) {
     if (messages_ != nullptr) {
       messages_->Say(at_, std::forward<A>(args)...);
     }
   }
-
-  template<typename... A> void Say(const CharBlock &at, A &&... args) {
+  template<typename... A> void Say(CharBlock at, A &&... args) {
     if (messages_ != nullptr) {
       messages_->Say(at, std::forward<A>(args)...);
     }
@@ -263,5 +273,5 @@ private:
   CharBlock at_;
   Messages *messages_{nullptr};
 };
-}  // namespace Fortran::parser
+}
 #endif  // FORTRAN_PARSER_MESSAGE_H_

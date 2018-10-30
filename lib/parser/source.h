@@ -50,15 +50,18 @@ public:
 
 private:
   bool ReadFile(std::string errorPath, std::stringstream *error);
+  void IdentifyPayload();
+  void RecordLineStarts();
 
   std::string path_;
   int fileDescriptor_{-1};
   bool isMemoryMapped_{false};
-  const char *content_{nullptr};
+  const char *address_{nullptr};  // raw content
+  std::size_t size_{0};
+  const char *content_{nullptr};  // usable content
   std::size_t bytes_{0};
   std::vector<std::size_t> lineStart_;
   std::string normalized_;
 };
-
-}  // namespace Fortran::parser
+}
 #endif  // FORTRAN_PARSER_SOURCE_H_

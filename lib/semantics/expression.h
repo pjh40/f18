@@ -17,23 +17,23 @@
 
 #include "default-kinds.h"
 #include "../evaluate/expression.h"
+#include "../evaluate/intrinsics.h"
 #include "../evaluate/type.h"
 #include "../parser/parse-tree.h"
 #include <optional>
 
 namespace Fortran::semantics {
 
+class SemanticsContext;
+
 using MaybeExpr = std::optional<evaluate::Expr<evaluate::SomeType>>;
 
 // Semantic analysis of one expression.
 std::optional<evaluate::Expr<evaluate::SomeType>> AnalyzeExpr(
-    evaluate::FoldingContext &, const IntrinsicTypeDefaultKinds &,
-    const parser::Expr &);
+    SemanticsContext &, const parser::Expr &);
 
 // Semantic analysis of all expressions in a parse tree, which is
 // decorated with typed representations for top-level expressions.
-void AnalyzeExpressions(parser::Program &, evaluate::FoldingContext &,
-    const IntrinsicTypeDefaultKinds &, const evaluate::IntrinsicProcTable &);
-
-}  // namespace Fortran::semantics
+void AnalyzeExpressions(parser::Program &, SemanticsContext &);
+}
 #endif  // FORTRAN_SEMANTICS_EXPRESSION_H_

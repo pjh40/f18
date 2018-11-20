@@ -20,6 +20,7 @@
 #include "../evaluate/common.h"
 #include "../evaluate/fold.h"
 #include "../evaluate/tools.h"
+#include "../parser/characters.h"
 #include "../parser/parse-tree-visitor.h"
 #include "../parser/parse-tree.h"
 #include <functional>
@@ -165,6 +166,8 @@ struct ExprAnalyzer {
   // Kind parameter analysis always returns a valid kind value.
   int Analyze(
       const std::optional<parser::KindParam> &, int defaultKind, int kanjiKind);
+
+  MaybeExpr Analyze(std::string &&, int);
 
   std::optional<Subscript> Analyze(const parser::SectionSubscript &);
   std::vector<Subscript> Analyze(const std::list<parser::SectionSubscript> &);
@@ -430,16 +433,38 @@ MaybeExpr ExprAnalyzer::Analyze(const parser::ComplexLiteralConstant &z) {
       context.defaultKinds().GetDefaultKind(TypeCategory::Real)));
 }
 
+MaybeExpr ExprAnalyzer::Analyze(std::string &&string, int kind) {
+  if (!IsValidKindOfIntrinsicType(TypeCategory::Character, kind)) {
+    Say("unsupported CHARACTER(KIND=%d)"_err_en_US, kind);
+    return std::nullopt;
+  }
+  if (kind == 1) {
+    return {AsGenericExpr(
+        Constant<Type<TypeCategory::Character, 1>>{std::move(string)})};
+  } else if (std::optional<std::u32string> unicode{
+                 parser::DecodeUTF8(string)}) {
+    if (kind == 4) {
+      return {AsGenericExpr(
+          Constant<Type<TypeCategory::Character, 4>>{std::move(*unicode)})};
+    }
+    CHECK(kind == 2);
+    // TODO: better Kanji support
+    std::u16string result;
+    for (const char32_t &ch : *unicode) {
+      result += static_cast<char16_t>(ch);
+    }
+    return {AsGenericExpr(
+        Constant<Type<TypeCategory::Character, 2>>{std::move(result)})};
+  } else {
+    Say("bad UTF-8 encoding of CHARACTER(KIND=%d) literal"_err_en_US, kind);
+    return std::nullopt;
+  }
+}
+
 MaybeExpr ExprAnalyzer::Analyze(const parser::CharLiteralConstant &x) {
   int kind{Analyze(std::get<std::optional<parser::KindParam>>(x.t), 1)};
   auto value{std::get<std::string>(x.t)};
-  auto result{common::SearchDynamicTypes(
-      TypeKindVisitor<TypeCategory::Character, Constant, std::string>{
-          kind, std::move(value)})};
-  if (!result.has_value()) {
-    Say("unsupported CHARACTER(KIND=%d)"_err_en_US, kind);
-  }
-  return result;
+  return Analyze(std::move(value), kind);
 }
 
 MaybeExpr ExprAnalyzer::Analyze(const parser::LogicalLiteralConstant &x) {
@@ -456,9 +481,9 @@ MaybeExpr ExprAnalyzer::Analyze(const parser::LogicalLiteralConstant &x) {
 }
 
 MaybeExpr ExprAnalyzer::Analyze(const parser::HollerithLiteralConstant &x) {
-  return common::SearchDynamicTypes(
-      TypeKindVisitor<TypeCategory::Character, Constant, std::string>{
-          context.defaultKinds().GetDefaultKind(TypeCategory::Character), x.v});
+  int kind{context.defaultKinds().GetDefaultKind(TypeCategory::Character)};
+  auto value{x.v};
+  return Analyze(std::move(value), kind);
 }
 
 MaybeExpr ExprAnalyzer::Analyze(const parser::BOZLiteralConstant &x) {
@@ -520,7 +545,7 @@ MaybeExpr TypedWrapper(DynamicType &&dyType, WRAPPED &&x) {
 
 // Wraps a data reference in a typed Designator<>.
 static MaybeExpr Designate(DataRef &&dataRef) {
-  const Symbol &symbol{*dataRef.GetSymbol(false)};
+  const Symbol &symbol{dataRef.GetLastSymbol()};
   if (std::optional<DynamicType> dyType{GetSymbolType(symbol)}) {
     return TypedWrapper<Designator, DataRef>(
         std::move(*dyType), std::move(dataRef));
@@ -535,7 +560,14 @@ MaybeExpr ExprAnalyzer::Analyze(const parser::Name &n) {
         "TODO INTERNAL: name '%s' was not resolved to a symbol"_err_en_US,
         n.ToString().data());
   } else if (n.symbol->attrs().test(semantics::Attr::PARAMETER)) {
-    Say("TODO: PARAMETER references not yet implemented"_err_en_US);
+    if (auto *details{n.symbol->detailsIf<semantics::ObjectEntityDetails>()}) {
+      auto &init{details->init()};
+      if (init.Resolve(context)) {
+        return init.Get();
+      }
+    }
+    Say(n.source, "parameter '%s' does not have a value"_err_en_US,
+        n.ToString().data());
     // TODO: enumerators, do they have the PARAMETER attribute?
   } else {
     if (MaybeExpr result{Designate(DataRef{*n.symbol})}) {
@@ -570,7 +602,7 @@ MaybeExpr ExprAnalyzer::Analyze(const parser::Substring &ss) {
               GetSubstringBound(std::get<0>(range.t))};
           std::optional<Expr<SubscriptInteger>> last{
               GetSubstringBound(std::get<1>(range.t))};
-          const Symbol &symbol{*checked->GetSymbol(false)};
+          const Symbol &symbol{checked->GetLastSymbol()};
           if (std::optional<DynamicType> dynamicType{GetSymbolType(symbol)}) {
             if (dynamicType->category == TypeCategory::Character) {
               return WrapperHelper<TypeCategory::Character, Designator,
@@ -686,7 +718,7 @@ MaybeExpr ExprAnalyzer::ApplySubscripts(
 }
 
 MaybeExpr ExprAnalyzer::CompleteSubscripts(ArrayRef &&ref) {
-  const Symbol &symbol{*ref.GetSymbol(false)};
+  const Symbol &symbol{ref.GetLastSymbol()};
   int symbolRank{symbol.Rank()};
   if (ref.subscript.empty()) {
     // A -> A(:,:)
@@ -711,7 +743,7 @@ MaybeExpr ExprAnalyzer::CompleteSubscripts(ArrayRef &&ref) {
                  symbol.detailsIf<semantics::ObjectEntityDetails>()}) {
     // C928 & C1002
     if (Triplet * last{std::get_if<Triplet>(&ref.subscript.back().u)}) {
-      if (!last->upper().has_value() && details->isAssumedSize()) {
+      if (!last->upper().has_value() && details->IsAssumedSize()) {
         Say("assumed-size array '%s' must have explicit final subscript upper bound value"_err_en_US,
             symbol.name().ToString().data());
       }
@@ -797,13 +829,46 @@ MaybeExpr ExprAnalyzer::Analyze(const parser::CoindexedNamedObject &co) {
   return std::nullopt;
 }
 
-MaybeExpr ExprAnalyzer::Analyze(const parser::CharLiteralConstantSubstring &) {
-  Say("TODO: CharLiteralConstantSubstring unimplemented"_err_en_US);
+MaybeExpr ExprAnalyzer::Analyze(const parser::CharLiteralConstantSubstring &x) {
+  const parser::SubstringRange &range{std::get<parser::SubstringRange>(x.t)};
+  std::optional<Expr<SubscriptInteger>> lower{
+      GetSubstringBound(std::get<0>(range.t))};
+  std::optional<Expr<SubscriptInteger>> upper{
+      GetSubstringBound(std::get<1>(range.t))};
+  if (MaybeExpr string{Analyze(std::get<parser::CharLiteralConstant>(x.t))}) {
+    if (auto *charExpr{std::get_if<Expr<SomeCharacter>>(&string->u)}) {
+      Expr<SubscriptInteger> length{std::visit(
+          [](const auto &ckExpr) { return ckExpr.LEN(); }, charExpr->u)};
+      if (!lower.has_value()) {
+        lower = Expr<SubscriptInteger>{1};
+      }
+      if (!upper.has_value()) {
+        std::optional<std::int64_t> size{ToInt64(length)};
+        CHECK(size.has_value());
+        upper = Expr<SubscriptInteger>{static_cast<std::int64_t>(*size)};
+      }
+      return std::visit(
+          [&](auto &&ckExpr) -> MaybeExpr {
+            using Result = ResultType<decltype(ckExpr)>;
+            auto *cp{std::get_if<Constant<Result>>(&ckExpr.u)};
+            CHECK(cp != nullptr);  // the parent was parsed as a constant string
+            StaticDataObject::Pointer staticData{StaticDataObject::Create()};
+            staticData->set_alignment(Result::kind)
+                .set_itemBytes(Result::kind)
+                .Push(cp->value);
+            Substring substring{
+                std::move(staticData), std::move(*lower), std::move(*upper)};
+            return AsGenericExpr(Expr<SomeCharacter>{
+                Expr<Result>{Designator<Result>{std::move(substring)}}});
+          },
+          std::move(charExpr->u));
+    }
+  }
   return std::nullopt;
 }
 
 MaybeExpr ExprAnalyzer::Analyze(const parser::ArrayConstructor &) {
-  Say("TODO: ArrayConstructor unimplemented"_err_en_US);
+  Say("TODO: ArrayConstructor unimplemented"_en_US);
   return std::nullopt;
 }
 
@@ -1177,11 +1242,12 @@ MaybeExpr ExprAnalyzer::TopLevelChecks(DataRef &&dataRef) {
 void ExprAnalyzer::CheckUnsubscriptedComponent(const Component &component) {
   int baseRank{component.base().Rank()};
   if (baseRank > 0) {
-    int componentRank{component.symbol().Rank()};
+    const Symbol &symbol{component.GetLastSymbol()};
+    int componentRank{symbol.Rank()};
     if (componentRank > 0) {
       Say("reference to whole rank-%d component '%%%s' of "
           "rank-%d array of derived type is not allowed"_err_en_US,
-          componentRank, component.symbol().name().ToString().data(), baseRank);
+          componentRank, symbol.name().ToString().data(), baseRank);
     }
   }
 }
@@ -1194,6 +1260,43 @@ evaluate::MaybeExpr AnalyzeExpr(
   return evaluate::ExprAnalyzer{context}.Analyze(expr);
 }
 
+template<typename A>
+evaluate::MaybeExpr AnalyzeWrappedExpr(
+    SemanticsContext &context, const A &expr) {
+  evaluate::ExprAnalyzer ea{context};
+  return evaluate::AnalyzeHelper(ea, expr);
+}
+
+evaluate::MaybeExpr AnalyzeExpr(
+    SemanticsContext &context, const parser::Scalar<parser::Expr> &expr) {
+  return AnalyzeWrappedExpr(context, expr);
+}
+evaluate::MaybeExpr AnalyzeExpr(
+    SemanticsContext &context, const parser::Constant<parser::Expr> &expr) {
+  return AnalyzeWrappedExpr(context, expr);
+}
+evaluate::MaybeExpr AnalyzeExpr(
+    SemanticsContext &context, const parser::Integer<parser::Expr> &expr) {
+  return AnalyzeWrappedExpr(context, expr);
+}
+evaluate::MaybeExpr AnalyzeExpr(SemanticsContext &context,
+    const parser::Scalar<parser::Constant<parser::Expr>> &expr) {
+  return AnalyzeWrappedExpr(context, expr);
+}
+evaluate::MaybeExpr AnalyzeExpr(SemanticsContext &context,
+    const parser::Scalar<parser::Integer<parser::Expr>> &expr) {
+  return AnalyzeWrappedExpr(context, expr);
+}
+evaluate::MaybeExpr AnalyzeExpr(SemanticsContext &context,
+    const parser::Integer<parser::Constant<parser::Expr>> &expr) {
+  return AnalyzeWrappedExpr(context, expr);
+}
+evaluate::MaybeExpr AnalyzeExpr(SemanticsContext &context,
+    const parser::Scalar<parser::Integer<parser::Constant<parser::Expr>>>
+        &expr) {
+  return AnalyzeWrappedExpr(context, expr);
+}
+
 class Mutator {
 public:
   Mutator(SemanticsContext &context) : context_{context} {}
@@ -1204,7 +1307,7 @@ public:
   bool Pre(parser::Expr &expr) {
     if (expr.typedExpr.get() == nullptr) {
       if (MaybeExpr checked{AnalyzeExpr(context_, expr)}) {
-        checked->Dump(std::cout << "checked expression: ") << '\n';
+        checked->AsFortran(std::cout << "checked expression: ") << '\n';
         expr.typedExpr.reset(
             new evaluate::GenericExprWrapper{std::move(*checked)});
       } else {

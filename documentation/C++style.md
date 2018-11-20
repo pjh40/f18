@@ -130,6 +130,7 @@ class.
 1. Use move semantics and smart pointers to make dynamic memory ownership
 clear.  Consider reworking any code that uses `malloc()` or a (non-placement)
 `operator new`.
+See the section on Pointers below for some suggested options.
 1. Use references for `const` arguments; prefer `const` references to values for
 all but small types that are trivially copyable (e.g., use `const std::string &`
 and `int`).  Use non-`const` pointers for output arguments.  Put output arguments
@@ -158,7 +159,58 @@ will be implicitly deleted.  When neither copy nor move constructors
 or assignments should exist for a class, explicitly `=delete` all of them.
 1. Make single-argument constructors (other than copy and move constructors)
 'explicit' unless you really want to define an implicit conversion.
-#### Overall design preferences
+#### Pointers
+There are many -- perhaps too many -- means of indirect addressing
+data in this project.
+Some of these are standard C++ language and library features,
+while others are local inventions in `lib/common`:
+* Bare pointers (`Foo *p`): these are obviously nullable, non-owning,
+undefined when uninitialized, shallowly copyable, reassignable, and almost
+never the right abstraction to use in this project.
+* References (`Foo &r`, `const Foo &r`): non-nullable, not owning,
+shallowly copyable, and not reassignable.
+References are great for invisible indirection to objects whose lifetimes are
+broader than that of the reference.
+(Sometimes when a class data member should be a reference, but we also need
+reassignability, it will be declared as a pointer, and its accessor
+will be defined to return a reference.)
+* Rvalue references (`Foo &&r`): These are non-nullable references
+*with* ownership, and they are ubiquitously used for formal arguments
+wherever appropriate.
+* `std::unique_ptr<>`: A nullable pointer with ownership, null by default,
+not copyable, reassignable.
+* `std::shared_ptr<>`: A nullable pointer with shared ownership via reference
+counting, null by default, shallowly copyable, reassignable, and slow.
+* `OwningPointer<>`: A nullable pointer with ownership, better suited
+for use with forward-defined types than `std::unique_ptr<>` is.
+Null by default, not copyable, reassignable.
+Does not have means for allocating data, and inconveniently requires
+the definition of an external destructor.
+* `Indirection<>`: A non-nullable pointer with ownership and
+optional deep copy semantics; reassignable.
+Often better than a reference (due to ownership) or `std::unique_ptr<>`
+(due to non-nullability and copyability).
+Can be wrapped in `std::optional<>` when nullability is required.
+* `CountedReference<>`: A nullable pointer with shared ownership via
+reference counting, null by default, shallowly copyable, reassignable.
+Safe to use *only* when the data are private to just one
+thread of execution.
+Used sparingly in place of `std::shared_ptr<>` only when the overhead
+of that standard feature is prohibitive.
+
+A feature matrix:
+
+| pointer              | nullable | default null | owning | reassignable | copyable          | undefined type ok? |
+| -------              | -------- | ------------ | ------ | ------------ | --------          | ------------------ |
+| `*p`                 | yes      | no           | no     | yes          | shallowly         | yes                |
+| `&r`                 | no       | n/a          | no     | no           | shallowly         | yes                |
+| `unique_ptr<>`       | yes      | yes          | yes    | yes          | no                | no                 |
+| `shared_ptr<>`       | yes      | yes          | yes    | yes          | shallowly         | no                 |
+| `OwningPointer<>`    | yes      | yes          | yes    | yes          | no                | yes                |
+| `Indirection<>`      | no       | n/a          | yes    | yes          | optionally deeply | no                 |
+| `CountedReference<>` | yes      | yes          | yes    | yes          | shallowly         | no                 |
+
+### Overall design preferences
 Don't use dynamic solutions to solve problems that can be solved at
 build time; don't solve build time problems by writing programs that
 produce source code when macros and templates suffice; don't write macros

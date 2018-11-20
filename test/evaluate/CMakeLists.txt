@@ -40,9 +40,11 @@ add_executable(expression-test
 )
 
 target_link_libraries(expression-test
-  FortranEvaluate
   FortranEvaluateTesting
+  FortranEvaluate
   FortranParser
+  FortranSemantics
+  FortranEvaluate
 )
 
 add_executable(integer-test
@@ -59,9 +61,11 @@ add_executable(intrinsics-test
 )
 
 target_link_libraries(intrinsics-test
-  FortranEvaluate
   FortranEvaluateTesting
+  FortranEvaluate
   FortranParser
+  FortranSemantics
+  FortranRuntime
 )
 
 add_executable(logical-test
@@ -88,6 +92,17 @@ add_executable(reshape-test
 )
 
 target_link_libraries(reshape-test
+  FortranSemantics
+  FortranEvaluate
+  FortranEvaluateTesting
+  FortranRuntime
+)
+
+add_executable(ISO-Fortran-binding-test
+  ISO-Fortran-binding.cc
+)
+
+target_link_libraries(ISO-Fortran-binding-test
   FortranEvaluate
   FortranEvaluateTesting
   FortranRuntime
@@ -101,3 +116,4 @@ add_test(NAME Intrinsics COMMAND intrinsics-test)
 add_test(NAME Logical COMMAND logical-test)
 add_test(NAME Real COMMAND real-test)
 add_test(NAME RESHAPE COMMAND reshape-test)
+add_test(NAME ISO-Fortran-binding COMMAND ISO-Fortran-binding-test)

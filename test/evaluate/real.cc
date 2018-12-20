@@ -18,12 +18,14 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <sstream>
 #include <type_traits>
 
 using namespace Fortran::evaluate;
 using namespace Fortran::common;
 
 using Real2 = Scalar<Type<TypeCategory::Real, 2>>;
+using Real3 = Scalar<Type<TypeCategory::Real, 3>>;
 using Real4 = Scalar<Type<TypeCategory::Real, 4>>;
 using Real8 = Scalar<Type<TypeCategory::Real, 8>>;
 using Real10 = Scalar<Type<TypeCategory::Real, 10>>;
@@ -58,10 +60,11 @@ void dumpTest() {
 }
 
 template<typename R> void basicTests(int rm, Rounding rounding) {
+  static constexpr int kind{R::bits / 8};
   char desc[64];
   using Word = typename R::Word;
-  std::snprintf(
-      desc, sizeof desc, "bits=%d, le=%d", R::bits, Word::littleEndian);
+  std::snprintf(desc, sizeof desc, "bits=%d, le=%d, kind=%d", R::bits,
+      Word::littleEndian, kind);
   R zero;
   TEST(!zero.IsNegative())(desc);
   TEST(!zero.IsNotANumber())(desc);
@@ -159,6 +162,15 @@ template<typename R> void basicTests(int rm, Rounding rounding) {
       TEST(!vr.value.IsInfinite())(ldesc);
       TEST(ivf.flags.empty())(ldesc);
       MATCH(x, ivf.value.ToUInt64())(ldesc);
+      std::stringstream ss;
+      vr.value.AsFortran(ss, kind, rounding);
+      std::string decimal{ss.str()};
+      const char *p{decimal.data()};
+      MATCH(x, static_cast<std::uint64_t>(std::stold(decimal)))(ldesc);
+      auto check{R::Read(p, rounding)};
+      auto icheck{check.value.template ToInteger<Integer8>()};
+      MATCH(x, icheck.value.ToUInt64())(ldesc);
+      TEST(vr.value.Compare(check.value) == Relation::Equal)(ldesc);
     }
     TEST(vr.value.AINT().value.Compare(vr.value) == Relation::Equal)(ldesc);
     ix = ix.Negate().value;
@@ -226,6 +238,12 @@ inline bool IsInfinite(std::uint32_t x) {
 
 inline bool IsInfinite(std::uint64_t x) {
   return (x & 0x7fffffffffffffff) == 0x7ff0000000000000;
+}
+
+inline bool IsNegative(std::uint32_t x) { return (x & 0x80000000) != 0; }
+
+inline bool IsNegative(std::uint64_t x) {
+  return (x & 0x8000000000000000) != 0;
 }
 
 inline std::uint32_t NormalizeNaN(std::uint32_t x) {
@@ -386,29 +404,34 @@ void subsetTests(int pass, Rounding rounding, std::uint32_t opds) {
       MATCH(IsInfinite(rj), x.IsInfinite())
       ("%d IsInfinite(0x%llx)", pass, static_cast<long long>(rj));
 
-      if (rounding == Rounding::TiesToEven) {
-        auto scaled{x.AsScaledDecimal()};
-        if (IsNaN(rj)) {
-          TEST(scaled.flags.test(RealFlag::InvalidArgument))
-          ("%d invalid(0x%llx)", pass, static_cast<long long>(rj));
-        } else if (IsInfinite(rj)) {
-          TEST(scaled.flags.test(RealFlag::Overflow))
-          ("%d overflow(0x%llx)", pass, static_cast<long long>(rj));
-        } else {
-          auto integer{scaled.value.integer.ToUInt64()};
-          MATCH(x.IsNegative(), scaled.value.negative)
-          ("%d IsNegative(0x%llx)", pass, static_cast<long long>(rj));
-          char buffer[128];
-          const char *p = buffer;
-          snprintf(buffer, sizeof buffer, "%c%llu.0E%d",
-              "+-"[scaled.value.negative],
-              static_cast<unsigned long long>(integer),
-              scaled.value.decimalExponent);
-          auto readBack{REAL::Read(p, rounding)};
-          MATCH(rj, readBack.value.RawBits().ToUInt64())
-          ("%d scaled decimal 0x%llx %s", pass, static_cast<long long>(rj),
-              buffer);
+      static constexpr int kind{REAL::bits / 8};
+      std::stringstream ss, css;
+      x.AsFortran(ss, kind, rounding);
+      std::string s{ss.str()};
+      if (IsNaN(rj)) {
+        css << "(0._" << kind << "/0.)";
+        MATCH(css.str(), s)
+        ("%d invalid(0x%llx)", pass, static_cast<long long>(rj));
+      } else if (IsInfinite(rj)) {
+        css << '(';
+        if (IsNegative(rj)) {
+          css << '-';
         }
+        css << "1._" << kind << "/0.)";
+        MATCH(css.str(), s)
+        ("%d overflow(0x%llx)", pass, static_cast<long long>(rj));
+      } else {
+        const char *p = s.data();
+        if (*p == '(') {
+          ++p;
+        }
+        auto readBack{REAL::Read(p, rounding)};
+        MATCH(rj, readBack.value.RawBits().ToUInt64())
+        ("%d Read(AsFortran()) 0x%llx %s %g", pass, static_cast<long long>(rj),
+            s.data(), static_cast<double>(fj));
+        MATCH('_', *p)
+        ("%d Read(AsFortran()) 0x%llx %s %d", pass, static_cast<long long>(rj),
+            s.data(), static_cast<int>(p - s.data()));
       }
     }
 
@@ -492,6 +515,7 @@ void subsetTests(int pass, Rounding rounding, std::uint32_t opds) {
 
 void roundTest(int rm, Rounding rounding, std::uint32_t opds) {
   basicTests<Real2>(rm, rounding);
+  basicTests<Real3>(rm, rounding);
   basicTests<Real4>(rm, rounding);
   basicTests<Real8>(rm, rounding);
   basicTests<Real10>(rm, rounding);

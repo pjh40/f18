@@ -16,6 +16,7 @@
 #include "canonicalize-do.h"
 #include "check-do-concurrent.h"
 #include "default-kinds.h"
+#include "expression.h"
 #include "mod-file.h"
 #include "resolve-labels.h"
 #include "resolve-names.h"
@@ -36,6 +37,20 @@ SemanticsContext::SemanticsContext(
     foldingContext_{evaluate::FoldingContext{
         parser::ContextualMessages{parser::CharBlock{}, &messages_}}} {}
 
+DeclTypeSpec &SemanticsContext::MakeNumericType(
+    TypeCategory category, int kind) {
+  if (kind == 0) {
+    kind = defaultKinds_.GetDefaultKind(category);
+  }
+  return globalScope_.MakeNumericType(category, kind);
+}
+DeclTypeSpec &SemanticsContext::MakeLogicalType(int kind) {
+  if (kind == 0) {
+    kind = defaultKinds_.GetDefaultKind(TypeCategory::Logical);
+  }
+  return globalScope_.MakeLogicalType(kind);
+}
+
 bool SemanticsContext::AnyFatalError() const {
   return !messages_.empty() &&
       (warningsAreErrors_ || messages_.AnyFatalError());
@@ -55,7 +70,6 @@ bool Semantics::Perform() {
   if (AnyFatalError()) {
     return false;
   }
-  ResolveSymbolExprs(context_);
   if (AnyFatalError()) {
     return false;
   }
@@ -72,6 +86,14 @@ bool Semantics::Perform() {
     AnalyzeExpressions(program_, context_);
   }
   return !AnyFatalError();
+}
+
+const Scope &Semantics::FindScope(const parser::CharBlock &source) const {
+  if (const auto *scope{context_.globalScope().FindScope(source)}) {
+    return *scope;
+  } else {
+    common::die("invalid source location");
+  }
 }
 
 void Semantics::EmitMessages(std::ostream &os) const {

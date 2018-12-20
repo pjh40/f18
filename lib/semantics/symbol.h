@@ -19,7 +19,8 @@
 #include "../common/enum-set.h"
 #include "../common/fortran.h"
 #include <functional>
-#include <memory>
+#include <list>
+#include <optional>
 
 namespace Fortran::semantics {
 
@@ -99,13 +100,13 @@ private:
 class EntityDetails {
 public:
   EntityDetails(bool isDummy = false) : isDummy_{isDummy} {}
-  const std::optional<DeclTypeSpec> &type() const { return type_; }
+  const DeclTypeSpec *type() const { return type_; }
   void set_type(const DeclTypeSpec &type);
   bool isDummy() const { return isDummy_; }
 
 private:
   bool isDummy_;
-  std::optional<DeclTypeSpec> type_;
+  const DeclTypeSpec *type_{nullptr};
   friend std::ostream &operator<<(std::ostream &, const EntityDetails &);
 };
 
@@ -114,29 +115,29 @@ class ObjectEntityDetails {
 public:
   ObjectEntityDetails(const EntityDetails &);
   ObjectEntityDetails(bool isDummy = false) : isDummy_{isDummy} {}
-  LazyExpr &init() { return init_; }
-  const LazyExpr &init() const { return init_; }
-  void set_init(const parser::Expr &);
-  const std::optional<DeclTypeSpec> &type() const { return type_; }
+  MaybeExpr &init() { return init_; }
+  const MaybeExpr &init() const { return init_; }
+  void set_init(MaybeExpr &&expr) { init_ = std::move(expr); }
+  const DeclTypeSpec *type() const { return type_; }
   void set_type(const DeclTypeSpec &type);
   ArraySpec &shape() { return shape_; }
   const ArraySpec &shape() const { return shape_; }
   void set_shape(const ArraySpec &shape);
   bool isDummy() const { return isDummy_; }
-  bool isArray() const { return !shape_.empty(); }
+  bool IsArray() const { return !shape_.empty(); }
   bool IsAssumedSize() const {
-    return isDummy() && isArray() && shape_.back().ubound().isAssumed() &&
+    return isDummy() && IsArray() && shape_.back().ubound().isAssumed() &&
         !shape_.back().lbound().isAssumed();
   }
   bool IsAssumedRank() const {
-    return isDummy() && isArray() && shape_.back().ubound().isAssumed() &&
+    return isDummy() && IsArray() && shape_.back().ubound().isAssumed() &&
         shape_.back().lbound().isAssumed();
   }
 
 private:
   bool isDummy_;
-  LazyExpr init_;
-  std::optional<DeclTypeSpec> type_;
+  MaybeExpr init_;
+  const DeclTypeSpec *type_{nullptr};
   ArraySpec shape_;
   friend std::ostream &operator<<(std::ostream &, const ObjectEntityDetails &);
 };
@@ -159,15 +160,15 @@ private:
 
 class DerivedTypeDetails {
 public:
-  bool hasTypeParams() const { return hasTypeParams_; }
+  const std::list<SourceName> &paramNames() const { return paramNames_; }
   const Symbol *extends() const { return extends_; }
   bool sequence() const { return sequence_; }
-  void set_hasTypeParams(bool x = true) { hasTypeParams_ = x; }
+  void add_paramName(const SourceName &name) { paramNames_.emplace_back(name); }
   void set_extends(const Symbol *extends) { extends_ = extends; }
   void set_sequence(bool x = true) { sequence_ = x; }
 
 private:
-  bool hasTypeParams_{false};
+  std::list<SourceName> paramNames_;
   const Symbol *extends_{nullptr};
   bool sequence_{false};
 };
@@ -187,7 +188,7 @@ class FinalProcDetails {};
 
 class MiscDetails {
 public:
-  ENUM_CLASS(Kind, ConstructName);
+  ENUM_CLASS(Kind, ConstructName, ScopeName);
   MiscDetails(Kind kind) : kind_{kind} {}
   Kind kind() const { return kind_; }
 
@@ -199,21 +200,19 @@ class TypeParamDetails {
 public:
   TypeParamDetails(common::TypeParamAttr attr) : attr_{attr} {}
   common::TypeParamAttr attr() const { return attr_; }
-  // std::optional<LazyExpr> &init() { return init_; }
-  // const std::optional<LazyExpr> &init() const { return init_; }
-  LazyExpr &init() { return init_; }
-  const LazyExpr &init() const { return init_; }
-  void set_init(const parser::Expr &);
-  const std::optional<DeclTypeSpec> &type() const { return type_; }
+  MaybeExpr &init() { return init_; }
+  const MaybeExpr &init() const { return init_; }
+  void set_init(MaybeExpr &&expr) { init_ = std::move(expr); }
+  const DeclTypeSpec *type() const { return type_; }
   void set_type(const DeclTypeSpec &type) {
     CHECK(!type_);
-    type_ = type;
+    type_ = &type;
   }
 
 private:
   common::TypeParamAttr attr_;
-  LazyExpr init_;
-  std::optional<DeclTypeSpec> type_;
+  MaybeExpr init_;
+  const DeclTypeSpec *type_{nullptr};
 };
 
 // Record the USE of a symbol: location is where (USE statement or renaming);
@@ -221,13 +220,13 @@ private:
 class UseDetails {
 public:
   UseDetails(const SourceName &location, const Symbol &symbol)
-    : location_{&location}, symbol_{&symbol} {}
-  const SourceName &location() const { return *location_; }
+    : location_{location}, symbol_{&symbol} {}
+  const SourceName &location() const { return location_; }
   const Symbol &symbol() const { return *symbol_; }
   const Symbol &module() const;
 
 private:
-  const SourceName *location_;
+  SourceName location_;
   const Symbol *symbol_;
 };
 
@@ -238,7 +237,7 @@ public:
   UseErrorDetails(const UseDetails &);
   UseErrorDetails &add_occurrence(const SourceName &, const Scope &);
 
-  using listType = std::list<std::pair<const SourceName *, const Scope *>>;
+  using listType = std::list<std::pair<SourceName, const Scope *>>;
   const listType occurrences() const { return occurrences_; };
 
 private:
@@ -258,7 +257,7 @@ private:
 class GenericDetails {
 public:
   using listType = std::list<const Symbol *>;
-  using procNamesType = std::list<std::pair<const SourceName *, bool>>;
+  using procNamesType = std::list<std::pair<SourceName, bool>>;
 
   GenericDetails() {}
   GenericDetails(const listType &specificProcs);
@@ -269,7 +268,7 @@ public:
 
   void add_specificProc(const Symbol *proc) { specificProcs_.push_back(proc); }
   void add_specificProcName(const SourceName &name, bool isModuleProc) {
-    specificProcNames_.emplace_back(&name, isModuleProc);
+    specificProcNames_.emplace_back(name, isModuleProc);
   }
   void ClearSpecificProcNames() { specificProcNames_.clear(); }
 
@@ -321,8 +320,7 @@ public:
   using Flags = common::EnumSet<Flag, Flag_enumSize>;
 
   const Scope &owner() const { return *owner_; }
-  const SourceName &name() const { return occurrences_.front(); }
-  const SourceName &lastOccurrence() const { return occurrences_.back(); }
+  const SourceName &name() const { return name_; }
   Attrs &attrs() { return attrs_; }
   const Attrs &attrs() const { return attrs_; }
   Flags &flags() { return flags_; }
@@ -366,10 +364,6 @@ public:
   // Can the details of this symbol be replaced with the given details?
   bool CanReplaceDetails(const Details &details) const;
 
-  const std::list<SourceName> &occurrences() const { return occurrences_; }
-  void add_occurrence(const SourceName &);
-  void remove_occurrence(const SourceName &);
-
   // Follow use-associations to get the ultimate entity.
   Symbol &GetUltimate();
   const Symbol &GetUltimate() const;
@@ -389,7 +383,7 @@ public:
 
 private:
   const Scope *owner_;
-  std::list<SourceName> occurrences_;
+  SourceName name_;
   Attrs attrs_;
   Flags flags_;
   Scope *scope_{nullptr};
@@ -414,7 +408,7 @@ public:
       Details &&details) {
     Symbol &symbol = Get();
     symbol.owner_ = &owner;
-    symbol.occurrences_.push_back(name);
+    symbol.name_ = name;
     symbol.attrs_ = attrs;
     symbol.details_ = std::move(details);
     return symbol;

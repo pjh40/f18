@@ -135,7 +135,7 @@ template<typename A> Expr<ResultType<A>> AsExpr(A &&x) {
 }
 
 template<typename T> Expr<T> AsExpr(Expr<T> &&x) {
-  static_assert(T::isSpecificIntrinsicType);
+  static_assert(IsSpecificIntrinsicType<T>);
   return std::move(x);
 }
 
@@ -176,7 +176,7 @@ Expr<SomeComplex> MakeComplex(Expr<Type<TypeCategory::Real, KIND>> &&re,
 
 template<typename TO, TypeCategory FROMCAT>
 Expr<TO> ConvertToType(Expr<SomeKind<FROMCAT>> &&x) {
-  static_assert(TO::isSpecificIntrinsicType);
+  static_assert(IsSpecificIntrinsicType<TO>);
   if constexpr (FROMCAT != TO::category) {
     if constexpr (TO::category == TypeCategory::Complex) {
       using Part = typename TO::Part;
@@ -214,7 +214,7 @@ Expr<TO> ConvertToType(Expr<SomeKind<FROMCAT>> &&x) {
 }
 
 template<typename TO> Expr<TO> ConvertToType(BOZLiteralConstant &&x) {
-  static_assert(TO::isSpecificIntrinsicType);
+  static_assert(IsSpecificIntrinsicType<TO>);
   using Value = typename Constant<TO>::Value;
   if constexpr (TO::category == TypeCategory::Integer) {
     return Expr<TO>{Constant<TO>{Value::ConvertUnsigned(std::move(x)).value}};
@@ -295,8 +295,9 @@ template<TypeCategory TOCAT, typename VALUE> struct ConvertToKindHelper {
 
 template<TypeCategory TOCAT, typename VALUE>
 Expr<SomeKind<TOCAT>> ConvertToKind(int kind, VALUE &&x) {
-  return *common::SearchDynamicTypes(
-      ConvertToKindHelper<TOCAT, VALUE>{kind, std::move(x)});
+  return common::SearchDynamicTypes(
+      ConvertToKindHelper<TOCAT, VALUE>{kind, std::move(x)})
+      .value();
 }
 
 // Given a type category CAT, SameKindExprs<CAT, N> is a variant that
@@ -368,7 +369,7 @@ template<typename A> Expr<TypeOf<A>> ScalarConstantToExpr(const A &x) {
 // for COMPLEX.
 template<template<typename> class OPR, typename SPECIFIC>
 Expr<SPECIFIC> Combine(Expr<SPECIFIC> &&x, Expr<SPECIFIC> &&y) {
-  static_assert(SPECIFIC::isSpecificIntrinsicType);
+  static_assert(IsSpecificIntrinsicType<SPECIFIC>);
   if constexpr (SPECIFIC::category == TypeCategory::Complex &&
       (std::is_same_v<OPR<LargestReal>, Add<LargestReal>> ||
           std::is_same_v<OPR<LargestReal>, Subtract<LargestReal>>)) {

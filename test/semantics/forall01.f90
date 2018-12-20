@@ -12,24 +12,17 @@
 ! See the License for the specific language governing permissions and
 ! limitations under the License.
 
-! negative test -- invalid labels, out of range
-
 ! RUN: ${F18} -funparse-with-symbols %s 2>&1 | ${FileCheck} %s
-! CHECK: CYCLE construct-name is not in scope
-! CHECK: IF construct name unexpected
-! CHECK: unnamed IF statement
-! CHECK: DO construct name mismatch
-! CHECK: should be
+! CHECK: Previous declaration of 'i'
+! CHECK: Previous declaration of 'j'
 
-subroutine sub00(a,b,n,m)
-  real a(n,m)
-  real b(n,m)
-  labelone: do i = 1, m
-     labeltwo: do j = 1, n
-50      a(i,j) = b(i,j) + 2.0
-        if (n .eq. m) then
-           cycle label3
-        end if label3
-60   end do labeltwo
-  end do label1
-end subroutine sub00
+subroutine forall
+  real :: a(9)
+! ERROR: 'i' is already declared in this scoping unit
+  forall (i=1:8, i=1:9)  a(i) = i
+  forall (j=1:8)
+! ERROR: 'j' is already declared in this scoping unit
+    forall (j=1:9)
+    end forall
+  end forall
+end subroutine forall

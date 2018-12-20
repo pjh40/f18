@@ -66,10 +66,6 @@ std::optional<DynamicType> GetSymbolType(const semantics::Symbol &);
 template<TypeCategory CATEGORY, int KIND = 0> class Type;
 
 template<TypeCategory CATEGORY, int KIND> struct TypeBase {
-  // Only types that represent a known kind of one of the five intrinsic
-  // data types will have set this flag to true.
-  // TODO pmk: convert to type predicate expression
-  static constexpr bool isSpecificIntrinsicType{true};
   static constexpr DynamicType dynamicType{CATEGORY, KIND};
   static constexpr DynamicType GetType() { return {dynamicType}; }
   static constexpr TypeCategory category{CATEGORY};
@@ -84,6 +80,7 @@ public:
   using Scalar = value::Integer<8 * KIND>;
 };
 
+// REAL(KIND=2) is IEEE half-precision (16 bits)
 template<>
 class Type<TypeCategory::Real, 2> : public TypeBase<TypeCategory::Real, 2> {
 public:
@@ -91,6 +88,16 @@ public:
       value::Real<typename Type<TypeCategory::Integer, 2>::Scalar, 11>;
 };
 
+// REAL(KIND=3) identifies the "other" half-precision format, which is
+// basically REAL(4) without its least-order 16 fraction bits.
+template<>
+class Type<TypeCategory::Real, 3> : public TypeBase<TypeCategory::Real, 3> {
+public:
+  using Scalar =
+      value::Real<typename Type<TypeCategory::Integer, 2>::Scalar, 8>;
+};
+
+// REAL(KIND=4) is IEEE-754 single precision (32 bits)
 template<>
 class Type<TypeCategory::Real, 4> : public TypeBase<TypeCategory::Real, 4> {
 public:
@@ -98,6 +105,7 @@ public:
       value::Real<typename Type<TypeCategory::Integer, 4>::Scalar, 24>;
 };
 
+// REAL(KIND=8) is IEEE double precision (64 bits)
 template<>
 class Type<TypeCategory::Real, 8> : public TypeBase<TypeCategory::Real, 8> {
 public:
@@ -105,12 +113,14 @@ public:
       value::Real<typename Type<TypeCategory::Integer, 8>::Scalar, 53>;
 };
 
+// REAL(KIND=10) is x87 FPU extended precision (80 bits, all explicit)
 template<>
 class Type<TypeCategory::Real, 10> : public TypeBase<TypeCategory::Real, 10> {
 public:
   using Scalar = value::Real<value::Integer<80>, 64, false>;
 };
 
+// REAL(KIND=16) is IEEE quad precision (128 bits)
 template<>
 class Type<TypeCategory::Real, 16> : public TypeBase<TypeCategory::Real, 16> {
 public:
@@ -181,7 +191,8 @@ static constexpr bool IsValidKindOfIntrinsicType(
     return kind == 1 || kind == 2 || kind == 4 || kind == 8 || kind == 16;
   case TypeCategory::Real:
   case TypeCategory::Complex:
-    return kind == 2 || kind == 4 || kind == 8 || kind == 10 || kind == 16;
+    return kind == 2 || kind == 3 || kind == 4 || kind == 8 || kind == 10 ||
+        kind == 16;
   case TypeCategory::Character: return kind == 1 || kind == 2 || kind == 4;
   case TypeCategory::Logical:
     return kind == 1 || kind == 2 || kind == 4 || kind == 8;
@@ -202,7 +213,7 @@ using CategoryTypesHelper =
     common::CombineTuples<CategoryKindTuple<CATEGORY, KINDS>...>;
 
 template<TypeCategory CATEGORY>
-using CategoryTypes = CategoryTypesHelper<CATEGORY, 1, 2, 4, 8, 10, 16, 32>;
+using CategoryTypes = CategoryTypesHelper<CATEGORY, 1, 2, 3, 4, 8, 10, 16, 32>;
 
 using IntegerTypes = CategoryTypes<TypeCategory::Integer>;
 using RealTypes = CategoryTypes<TypeCategory::Real>;
@@ -214,6 +225,10 @@ using FloatingTypes = common::CombineTuples<RealTypes, ComplexTypes>;
 using NumericTypes = common::CombineTuples<IntegerTypes, FloatingTypes>;
 using RelationalTypes = common::CombineTuples<NumericTypes, CharacterTypes>;
 using AllIntrinsicTypes = common::CombineTuples<RelationalTypes, LogicalTypes>;
+
+// Predicate: does a type represent a specific intrinsic type?
+template<typename T>
+constexpr bool IsSpecificIntrinsicType{common::HasMember<T, AllIntrinsicTypes>};
 
 // When Scalar<T> is S, then TypeOf<S> is T.
 // TypeOf is implemented by scanning all supported types for a match
@@ -235,13 +250,11 @@ template<typename CONST> using TypeOf = typename TypeOfHelper<CONST>::type;
 
 // Represents a type of any supported kind within a particular category.
 template<TypeCategory CATEGORY> struct SomeKind {
-  static constexpr bool isSpecificIntrinsicType{false};
   static constexpr TypeCategory category{CATEGORY};
 };
 
 template<> class SomeKind<TypeCategory::Derived> {
 public:
-  static constexpr bool isSpecificIntrinsicType{false};
   static constexpr TypeCategory category{TypeCategory::Derived};
 
   CLASS_BOILERPLATE(SomeKind)
@@ -265,9 +278,7 @@ using SomeDerived = SomeKind<TypeCategory::Derived>;
 // Represents a completely generic intrinsic type.
 using SomeCategory = std::tuple<SomeInteger, SomeReal, SomeComplex,
     SomeCharacter, SomeLogical, SomeDerived>;
-struct SomeType {
-  static constexpr bool isSpecificIntrinsicType{false};
-};
+struct SomeType {};
 
 // For "[extern] template class", &c. boilerplate
 #define FOR_EACH_INTEGER_KIND(PREFIX) \
@@ -278,12 +289,14 @@ struct SomeType {
   PREFIX<Type<TypeCategory::Integer, 16>>;
 #define FOR_EACH_REAL_KIND(PREFIX) \
   PREFIX<Type<TypeCategory::Real, 2>>; \
+  PREFIX<Type<TypeCategory::Real, 3>>; \
   PREFIX<Type<TypeCategory::Real, 4>>; \
   PREFIX<Type<TypeCategory::Real, 8>>; \
   PREFIX<Type<TypeCategory::Real, 10>>; \
   PREFIX<Type<TypeCategory::Real, 16>>;
 #define FOR_EACH_COMPLEX_KIND(PREFIX) \
   PREFIX<Type<TypeCategory::Complex, 2>>; \
+  PREFIX<Type<TypeCategory::Complex, 3>>; \
   PREFIX<Type<TypeCategory::Complex, 4>>; \
   PREFIX<Type<TypeCategory::Complex, 8>>; \
   PREFIX<Type<TypeCategory::Complex, 10>>; \
@@ -323,7 +336,7 @@ struct SomeType {
 // and derived type constants are structure constructors; generic
 // constants are generic expressions wrapping these constants.
 template<typename T> struct Constant {
-  static_assert(T::isSpecificIntrinsicType);
+  static_assert(IsSpecificIntrinsicType<T>);
   using Result = T;
   using Value = Scalar<Result>;
 

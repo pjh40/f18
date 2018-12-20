@@ -15,7 +15,6 @@
 #ifndef FORTRAN_SEMANTICS_SEMANTICS_H_
 #define FORTRAN_SEMANTICS_SEMANTICS_H_
 
-#include "expression.h"
 #include "scope.h"
 #include "../evaluate/common.h"
 #include "../evaluate/intrinsics.h"
@@ -68,6 +67,9 @@ public:
     return *this;
   }
 
+  DeclTypeSpec &MakeNumericType(TypeCategory, int kind = 0);
+  DeclTypeSpec &MakeLogicalType(int kind = 0);
+
   bool AnyFatalError() const;
   template<typename... A> parser::Message &Say(A... args) {
     return messages_.Say(std::forward<A>(args)...);
@@ -89,10 +91,13 @@ class Semantics {
 public:
   explicit Semantics(SemanticsContext &context, parser::Program &program,
       parser::CookedSource &cooked)
-    : context_{context}, program_{program}, cooked_{cooked} {}
+    : context_{context}, program_{program}, cooked_{cooked} {
+    context.globalScope().AddSourceRange(parser::CharBlock{cooked.data()});
+  }
 
   SemanticsContext &context() const { return context_; }
   bool Perform();
+  const Scope &FindScope(const parser::CharBlock &) const;
   bool AnyFatalError() const { return context_.AnyFatalError(); }
   void EmitMessages(std::ostream &) const;
   void DumpSymbols(std::ostream &);

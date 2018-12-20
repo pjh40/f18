@@ -15,7 +15,8 @@
 #include "symbol.h"
 #include "scope.h"
 #include "../common/idioms.h"
-#include <memory>
+#include <ostream>
+#include <string>
 
 namespace Fortran::semantics {
 
@@ -24,10 +25,10 @@ std::ostream &operator<<(std::ostream &os, const parser::CharBlock &name) {
 }
 
 const Scope *ModuleDetails::parent() const {
-  return isSubmodule_ ? &scope_->parent() : nullptr;
+  return isSubmodule_ && scope_ ? &scope_->parent() : nullptr;
 }
 const Scope *ModuleDetails::ancestor() const {
-  if (!isSubmodule_) {
+  if (!isSubmodule_ || !scope_) {
     return nullptr;
   }
   for (auto *scope{scope_};;) {
@@ -47,12 +48,12 @@ void ModuleDetails::set_scope(const Scope *scope) {
 
 void EntityDetails::set_type(const DeclTypeSpec &type) {
   CHECK(!type_);
-  type_ = type;
+  type_ = &type;
 }
 
 void ObjectEntityDetails::set_type(const DeclTypeSpec &type) {
   CHECK(!type_);
-  type_ = type;
+  type_ = &type;
 }
 
 void ObjectEntityDetails::set_shape(const ArraySpec &shape) {
@@ -68,10 +69,6 @@ ProcEntityDetails::ProcEntityDetails(const EntityDetails &d) {
   }
 }
 
-void TypeParamDetails::set_init(const parser::Expr &expr) {
-  init_ = LazyExpr{expr};
-}
-
 const Symbol &UseDetails::module() const {
   // owner is a module so it must have a symbol:
   return *symbol_->owner().symbol();
@@ -82,7 +79,7 @@ UseErrorDetails::UseErrorDetails(const UseDetails &useDetails) {
 }
 UseErrorDetails &UseErrorDetails::add_occurrence(
     const SourceName &location, const Scope &module) {
-  occurrences_.push_back(std::make_pair(&location, &module));
+  occurrences_.push_back(std::make_pair(location, &module));
   return *this;
 }
 
@@ -169,20 +166,6 @@ bool Symbol::CanReplaceDetails(const Details &details) const {
   }
 }
 
-void Symbol::add_occurrence(const SourceName &name) {
-  if (occurrences_.back().begin() != name.begin()) {
-    occurrences_.push_back(name);
-  }
-}
-void Symbol::remove_occurrence(const SourceName &name) {
-  auto end{occurrences_.end()};
-  for (auto it{occurrences_.begin()}; it != end; ++it) {
-    if (it->begin() == name.begin()) {
-      occurrences_.erase(it);
-      return;
-    }
-  }
-}
 Symbol &Symbol::GetUltimate() {
   return const_cast<Symbol &>(static_cast<const Symbol *>(this)->GetUltimate());
 }
@@ -204,16 +187,10 @@ DeclTypeSpec *Symbol::GetType() {
 const DeclTypeSpec *Symbol::GetType() const {
   return std::visit(
       common::visitors{
-          [](const EntityDetails &x) {
-            return x.type().has_value() ? &x.type().value() : nullptr;
-          },
-          [](const ObjectEntityDetails &x) {
-            return x.type().has_value() ? &x.type().value() : nullptr;
-          },
+          [](const EntityDetails &x) { return x.type(); },
+          [](const ObjectEntityDetails &x) { return x.type(); },
           [](const ProcEntityDetails &x) { return x.interface().type(); },
-          [](const TypeParamDetails &x) {
-            return x.type().has_value() ? &x.type().value() : nullptr;
-          },
+          [](const TypeParamDetails &x) { return x.type(); },
           [](const auto &) -> const DeclTypeSpec * { return nullptr; },
       },
       details_);
@@ -290,10 +267,6 @@ int Symbol::Rank() const {
 ObjectEntityDetails::ObjectEntityDetails(const EntityDetails &d)
   : isDummy_{d.isDummy()}, type_{d.type()} {}
 
-void ObjectEntityDetails::set_init(const parser::Expr &x) {
-  init_ = LazyExpr{x};
-}
-
 std::ostream &operator<<(std::ostream &os, const EntityDetails &x) {
   if (x.type()) {
     os << " type: " << *x.type();
@@ -311,8 +284,8 @@ std::ostream &operator<<(std::ostream &os, const ObjectEntityDetails &x) {
       os << ' ' << s;
     }
   }
-  if (x.init_.Get()) {
-    os << " init:" << x.init_;
+  if (x.init_) {
+    x.init_->AsFortran(os << " init:");
   }
   return os;
 }
@@ -358,11 +331,16 @@ std::ostream &operator<<(std::ostream &os, const Details &details) {
           [&](const MainProgramDetails &x) {},
           [&](const ModuleDetails &x) {
             if (x.isSubmodule()) {
-              auto &ancestor{x.ancestor()->name()};
-              auto &parent{x.parent()->name()};
-              os << " (" << ancestor.ToString();
-              if (parent != ancestor) {
-                os << ':' << parent.ToString();
+              os << " (";
+              if (x.ancestor()) {
+                auto &ancestor{x.ancestor()->name()};
+                os << ancestor;
+                if (x.parent()) {
+                  auto &parent{x.parent()->name()};
+                  if (ancestor != parent) {
+                    os << ':' << parent;
+                  }
+                }
               }
               os << ")";
             }
@@ -397,8 +375,8 @@ std::ostream &operator<<(std::ostream &os, const Details &details) {
           },
           [&](const UseErrorDetails &x) {
             os << " uses:";
-            for (const auto &pair : x.occurrences()) {
-              os << " from " << pair.second->name() << " at " << *pair.first;
+            for (const auto &[location, module] : x.occurrences()) {
+              os << " from " << module->name() << " at " << location;
             }
           },
           [](const HostAssocDetails &) {},
@@ -417,8 +395,8 @@ std::ostream &operator<<(std::ostream &os, const Details &details) {
               os << ' ' << *x.type();
             }
             os << ' ' << common::EnumToString(x.attr());
-            if (x.init().Get()) {
-              os << " init:" << x.init();
+            if (x.init()) {
+              x.init()->AsFortran(os << " init:");
             }
           },
           [&](const MiscDetails &x) {

@@ -14,6 +14,7 @@
 
 #include "scope.h"
 #include "symbol.h"
+#include <algorithm>
 #include <memory>
 
 namespace Fortran::semantics {
@@ -30,11 +31,7 @@ Scope &Scope::MakeScope(Kind kind, Symbol *symbol) {
 }
 
 Scope::iterator Scope::find(const SourceName &name) {
-  auto it{symbols_.find(name)};
-  if (it != end()) {
-    it->second->add_occurrence(name);
-  }
-  return it;
+  return symbols_.find(name);
 }
 Scope::const_iterator Scope::find(const SourceName &name) const {
   return symbols_.find(name);
@@ -42,14 +39,13 @@ Scope::const_iterator Scope::find(const SourceName &name) const {
 Scope::size_type Scope::erase(const SourceName &name) {
   auto it{symbols_.find(name)};
   if (it != end()) {
-    it->second->remove_occurrence(name);
     symbols_.erase(it);
     return 1;
   } else {
     return 0;
   }
 }
-Symbol *Scope::FindSymbol(const SourceName &name) {
+Symbol *Scope::FindSymbol(const SourceName &name) const {
   if (kind() == Kind::DerivedType) {
     return parent_.FindSymbol(name);
   }
@@ -73,9 +69,42 @@ Scope *Scope::FindSubmodule(const SourceName &name) const {
 bool Scope::AddSubmodule(const SourceName &name, Scope &submodule) {
   return submodules_.emplace(name, &submodule).second;
 }
-DerivedTypeSpec &Scope::MakeDerivedTypeSpec(const SourceName &name) {
+
+DeclTypeSpec &Scope::MakeNumericType(TypeCategory category, int kind) {
+  return MakeLengthlessType(NumericTypeSpec{category, kind});
+}
+DeclTypeSpec &Scope::MakeLogicalType(int kind) {
+  return MakeLengthlessType(LogicalTypeSpec{kind});
+}
+DeclTypeSpec &Scope::MakeTypeStarType() {
+  return MakeLengthlessType(DeclTypeSpec{DeclTypeSpec::TypeStar});
+}
+DeclTypeSpec &Scope::MakeClassStarType() {
+  return MakeLengthlessType(DeclTypeSpec{DeclTypeSpec::ClassStar});
+}
+// Types that can't have length parameters can be reused without having to
+// compare length expressions. They are stored in the global scope.
+DeclTypeSpec &Scope::MakeLengthlessType(const DeclTypeSpec &type) {
+  auto it{std::find(declTypeSpecs_.begin(), declTypeSpecs_.end(), type)};
+  if (it != declTypeSpecs_.end()) {
+    return *it;
+  } else {
+    declTypeSpecs_.push_back(type);
+    return declTypeSpecs_.back();
+  }
+}
+
+DeclTypeSpec &Scope::MakeCharacterType(ParamValue &&length, int kind) {
+  characterTypeSpecs_.emplace_back(std::move(length), kind);
+  declTypeSpecs_.emplace_back(characterTypeSpecs_.back());
+  return declTypeSpecs_.back();
+}
+
+DeclTypeSpec &Scope::MakeDerivedType(const SourceName &name) {
   derivedTypeSpecs_.emplace_back(name);
-  return derivedTypeSpecs_.back();
+  declTypeSpecs_.emplace_back(
+      DeclTypeSpec::TypeDerived, derivedTypeSpecs_.back());
+  return declTypeSpecs_.back();
 }
 
 Scope::ImportKind Scope::GetImportKind() const {
@@ -112,12 +141,8 @@ std::optional<parser::MessageFixedText> Scope::SetImportKind(ImportKind kind) {
   }
 }
 
-bool Scope::add_importName(const SourceName &name) {
-  if (!parent_.FindSymbol(name)) {
-    return false;
-  }
+void Scope::add_importName(const SourceName &name) {
   importNames_.insert(name);
-  return true;
 }
 
 // true if name can be imported or host-associated from parent scope.
@@ -132,6 +157,22 @@ bool Scope::CanImport(const SourceName &name) const {
   case ImportKind::Only: return importNames_.count(name) > 0;
   default: CRASH_NO_CASE;
   }
+}
+
+const Scope *Scope::FindScope(const parser::CharBlock &source) const {
+  if (!sourceRange_.Contains(source)) {
+    return nullptr;
+  }
+  for (const auto &child : children_) {
+    if (const auto *scope{child.FindScope(source)}) {
+      return scope;
+    }
+  }
+  return this;
+}
+
+void Scope::AddSourceRange(const parser::CharBlock &source) {
+  sourceRange_.ExtendToCover(source);
 }
 
 std::ostream &operator<<(std::ostream &os, const Scope &scope) {

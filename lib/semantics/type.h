@@ -47,72 +47,94 @@ using TypeCategory = common::TypeCategory;
 using SomeExpr = evaluate::Expr<evaluate::SomeType>;
 using MaybeExpr = std::optional<SomeExpr>;
 
-// An expression that starts out as a parser::Expr and gets resolved to
-// a MaybeExpr. Resolve should not be called until after names are resolved.
-// An unresolved LazyExpr should not be used after the parse tree is deleted.
-class LazyExpr {
-public:
-  LazyExpr() : u_{nullptr} {}
-  LazyExpr(const parser::Expr &expr) : u_{&expr} {}
-  LazyExpr(SomeExpr &&);
-  LazyExpr(LazyExpr &&) = default;
-  LazyExpr &operator=(LazyExpr &&) = default;
-  LazyExpr Clone() const { return LazyExpr(*this); }
-  const MaybeExpr Get() const;
-  MaybeExpr Get();
-  bool Resolve(SemanticsContext &);
-
-private:
-  using CopyableExprPtr = common::Indirection<SomeExpr, true>;
-  struct ErrorInExpr {};  // marks an expr with an error in evaluation
-  std::variant<const parser::Expr *, CopyableExprPtr, ErrorInExpr> u_;
-
-  LazyExpr(const LazyExpr &) = default;
-  friend std::ostream &operator<<(std::ostream &, const LazyExpr &);
-};
-
 // An array spec bound: an explicit integer expression or ASSUMED or DEFERRED
 class Bound {
 public:
   static Bound Assumed() { return Bound(Category::Assumed); }
   static Bound Deferred() { return Bound(Category::Deferred); }
-  Bound(const parser::Expr &expr)
-    : category_{Category::Explicit}, expr_{expr} {}
+  Bound(MaybeExpr &&expr)
+    : category_{Category::Explicit}, expr_{std::move(expr)} {}
   Bound(int bound);
   Bound(Bound &&) = default;
   Bound &operator=(Bound &&) = default;
-  Bound Clone() const { return Bound(category_, expr_.Clone()); }
+  Bound Clone() const;
   bool isExplicit() const { return category_ == Category::Explicit; }
   bool isAssumed() const { return category_ == Category::Assumed; }
   bool isDeferred() const { return category_ == Category::Deferred; }
-  const LazyExpr &GetExplicit() const { return expr_; }
-  void Resolve(SemanticsContext &);
+  const MaybeExpr &GetExplicit() const { return expr_; }
 
 private:
   enum class Category { Explicit, Deferred, Assumed };
   Bound(Category category) : category_{category} {}
-  Bound(Category category, LazyExpr &&expr)
+  Bound(Category category, MaybeExpr &&expr)
     : category_{category}, expr_{std::move(expr)} {}
   Category category_;
-  LazyExpr expr_;
+  MaybeExpr expr_;
   friend std::ostream &operator<<(std::ostream &, const Bound &);
+};
+
+// A type parameter value: integer expression or assumed or deferred.
+class ParamValue {
+public:
+  static const ParamValue Assumed() { return Category::Assumed; }
+  static const ParamValue Deferred() { return Category::Deferred; }
+  ParamValue(MaybeExpr &&expr);
+  ParamValue(std::int64_t);
+  bool isExplicit() const { return category_ == Category::Explicit; }
+  bool isAssumed() const { return category_ == Category::Assumed; }
+  bool isDeferred() const { return category_ == Category::Deferred; }
+  const MaybeExpr &GetExplicit() const { return expr_; }
+
+private:
+  enum class Category { Explicit, Deferred, Assumed };
+  ParamValue(Category category) : category_{category} {}
+  Category category_;
+  MaybeExpr expr_;
+  friend std::ostream &operator<<(std::ostream &, const ParamValue &);
 };
 
 class IntrinsicTypeSpec {
 public:
-  IntrinsicTypeSpec(TypeCategory, int kind);
-  const TypeCategory category() const { return category_; }
-  const int kind() const { return kind_; }
+  TypeCategory category() const { return category_; }
+  int kind() const { return kind_; }
   bool operator==(const IntrinsicTypeSpec &x) const {
     return category_ == x.category_ && kind_ == x.kind_;
   }
   bool operator!=(const IntrinsicTypeSpec &x) const { return !operator==(x); }
 
+protected:
+  IntrinsicTypeSpec(TypeCategory, int kind);
+
 private:
   TypeCategory category_;
   int kind_;
   friend std::ostream &operator<<(std::ostream &os, const IntrinsicTypeSpec &x);
-  // TODO: Character and len
+};
+
+class NumericTypeSpec : public IntrinsicTypeSpec {
+public:
+  NumericTypeSpec(TypeCategory category, int kind)
+    : IntrinsicTypeSpec(category, kind) {
+    CHECK(category == TypeCategory::Integer || category == TypeCategory::Real ||
+        category == TypeCategory::Complex);
+  }
+};
+
+class LogicalTypeSpec : public IntrinsicTypeSpec {
+public:
+  LogicalTypeSpec(int kind) : IntrinsicTypeSpec(TypeCategory::Logical, kind) {}
+};
+
+class CharacterTypeSpec : public IntrinsicTypeSpec {
+public:
+  CharacterTypeSpec(ParamValue &&length, int kind)
+    : IntrinsicTypeSpec(TypeCategory::Character, kind), length_{std::move(
+                                                            length)} {}
+  const ParamValue length() const { return length_; }
+
+private:
+  ParamValue length_;
+  friend std::ostream &operator<<(std::ostream &os, const CharacterTypeSpec &x);
 };
 
 class ShapeSpec {
@@ -169,101 +191,22 @@ private:
 
 using ArraySpec = std::list<ShapeSpec>;
 
-class GenericSpec {
-public:
-  enum Kind {
-    GENERIC_NAME,
-    OP_DEFINED,
-    ASSIGNMENT,
-    READ_FORMATTED,
-    READ_UNFORMATTED,
-    WRITE_FORMATTED,
-    WRITE_UNFORMATTED,
-    OP_ADD,
-    OP_AND,
-    OP_CONCAT,
-    OP_DIVIDE,
-    OP_EQ,
-    OP_EQV,
-    OP_GE,
-    OP_GT,
-    OP_LE,
-    OP_LT,
-    OP_MULTIPLY,
-    OP_NE,
-    OP_NEQV,
-    OP_NOT,
-    OP_OR,
-    OP_POWER,
-    OP_SUBTRACT,
-    OP_XOR,
-  };
-  static GenericSpec IntrinsicOp(Kind kind) {
-    return GenericSpec(kind, nullptr);
-  }
-  static GenericSpec DefinedOp(const SourceName &name) {
-    return GenericSpec(OP_DEFINED, &name);
-  }
-  static GenericSpec GenericName(const SourceName &name) {
-    return GenericSpec(GENERIC_NAME, &name);
-  }
-
-  const Kind kind() const { return kind_; }
-  const SourceName &genericName() const {
-    CHECK(kind_ == GENERIC_NAME);
-    return *name_;
-  }
-  const SourceName &definedOp() const {
-    CHECK(kind_ == OP_DEFINED);
-    return *name_;
-  }
-
-private:
-  GenericSpec(Kind kind, const SourceName *name) : kind_{kind}, name_{name} {}
-  const Kind kind_;
-  const SourceName *const name_;  // only for GENERIC_NAME & OP_DEFINED
-  friend std::ostream &operator<<(std::ostream &, const GenericSpec &);
-};
-
-// A type parameter value: integer expression or assumed or deferred.
-class ParamValue {
-public:
-  static const ParamValue Assumed() { return Category::Assumed; }
-  static const ParamValue Deferred() { return Category::Deferred; }
-  ParamValue(const parser::Expr &);
-  bool isExplicit() const { return category_ == Category::Explicit; }
-  bool isAssumed() const { return category_ == Category::Assumed; }
-  bool isDeferred() const { return category_ == Category::Deferred; }
-  const LazyExpr &GetExplicit() const { return expr_; }
-  void ResolveExplicit(SemanticsContext &);
-
-private:
-  enum class Category { Explicit, Deferred, Assumed };
-  ParamValue(Category category) : category_{category} {}
-  Category category_;
-  LazyExpr expr_;
-  friend std::ostream &operator<<(std::ostream &, const ParamValue &);
-};
-
 class DerivedTypeSpec {
 public:
   using listType = std::list<std::pair<std::optional<SourceName>, ParamValue>>;
-  explicit DerivedTypeSpec(const SourceName &name) : name_{&name} {}
+  DerivedTypeSpec &operator=(const DerivedTypeSpec &) = delete;
+  explicit DerivedTypeSpec(const SourceName &name) : name_{name} {}
   DerivedTypeSpec() = delete;
-  const SourceName &name() const { return *name_; }
+  const SourceName &name() const { return name_; }
   const Scope *scope() const { return scope_; }
   void set_scope(const Scope &);
   listType &paramValues() { return paramValues_; }
   const listType &paramValues() const { return paramValues_; }
-  void AddParamValue(ParamValue &&value) {
-    paramValues_.emplace_back(std::nullopt, std::move(value));
-  }
-  void AddParamValue(const SourceName &name, ParamValue &&value) {
-    paramValues_.emplace_back(name, std::move(value));
-  }
+  void AddParamValue(ParamValue &&);
+  void AddParamValue(const SourceName &, ParamValue &&);
 
 private:
-  const SourceName *name_;
+  const SourceName name_;
   const Scope *scope_{nullptr};
   listType paramValues_;
   friend std::ostream &operator<<(std::ostream &, const DerivedTypeSpec &);
@@ -271,10 +214,21 @@ private:
 
 class DeclTypeSpec {
 public:
-  enum Category { Intrinsic, TypeDerived, ClassDerived, TypeStar, ClassStar };
+  enum Category {
+    Numeric,
+    Logical,
+    Character,
+    TypeDerived,
+    ClassDerived,
+    TypeStar,
+    ClassStar
+  };
 
-  // intrinsic-type-spec or TYPE(intrinsic-type-spec)
-  DeclTypeSpec(const IntrinsicTypeSpec &);
+  // intrinsic-type-spec or TYPE(intrinsic-type-spec), not character
+  DeclTypeSpec(const NumericTypeSpec &);
+  DeclTypeSpec(const LogicalTypeSpec &);
+  // character
+  DeclTypeSpec(CharacterTypeSpec &);
   // TYPE(derived-type-spec) or CLASS(derived-type-spec)
   DeclTypeSpec(Category, DerivedTypeSpec &);
   // TYPE(*) or CLASS(*)
@@ -285,17 +239,27 @@ public:
   bool operator!=(const DeclTypeSpec &that) const { return !operator==(that); }
 
   Category category() const { return category_; }
-  const IntrinsicTypeSpec &intrinsicTypeSpec() const;
-  DerivedTypeSpec &derivedTypeSpec();
+  bool IsNumeric(TypeCategory) const;
+  const IntrinsicTypeSpec *AsIntrinsic() const;
+  const DerivedTypeSpec *AsDerived() const;
+  const NumericTypeSpec &numericTypeSpec() const;
+  const LogicalTypeSpec &logicalTypeSpec() const;
+  const CharacterTypeSpec &characterTypeSpec() const;
   const DerivedTypeSpec &derivedTypeSpec() const;
+  DerivedTypeSpec &derivedTypeSpec();
+  void set_category(Category category) { category_ = category; }
 
 private:
   Category category_;
   union TypeSpec {
     TypeSpec() : derived{nullptr} {}
-    TypeSpec(IntrinsicTypeSpec intrinsic) : intrinsic{intrinsic} {}
+    TypeSpec(NumericTypeSpec numeric) : numeric{numeric} {}
+    TypeSpec(LogicalTypeSpec logical) : logical{logical} {}
+    TypeSpec(CharacterTypeSpec *character) : character{character} {}
     TypeSpec(DerivedTypeSpec *derived) : derived{derived} {}
-    IntrinsicTypeSpec intrinsic;
+    NumericTypeSpec numeric;
+    LogicalTypeSpec logical;
+    CharacterTypeSpec *character;
     DerivedTypeSpec *derived;
   } typeSpec_;
 };
@@ -308,17 +272,14 @@ std::ostream &operator<<(std::ostream &, const DeclTypeSpec &);
 class ProcInterface {
 public:
   const Symbol *symbol() const { return symbol_; }
-  const DeclTypeSpec *type() const { return type_ ? &*type_ : nullptr; }
+  const DeclTypeSpec *type() const { return type_; }
   void set_symbol(const Symbol &symbol);
   void set_type(const DeclTypeSpec &type);
 
 private:
   const Symbol *symbol_{nullptr};
-  std::optional<DeclTypeSpec> type_;
+  const DeclTypeSpec *type_{nullptr};
 };
-
-// Resolve expressions in symbols.
-void ResolveSymbolExprs(SemanticsContext &);
 }
 
 #endif  // FORTRAN_SEMANTICS_TYPE_H_

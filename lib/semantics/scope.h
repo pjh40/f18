@@ -33,8 +33,8 @@ class Scope {
   using mapType = std::map<SourceName, Symbol *>;
 
 public:
-  ENUM_CLASS(
-      Kind, System, Global, Module, MainProgram, Subprogram, DerivedType, Block)
+  ENUM_CLASS(Kind, System, Global, Module, MainProgram, Subprogram, DerivedType,
+      Block, Forall)
   using ImportKind = common::ImportKind;
 
   // Create the Global scope -- the root of the scope tree
@@ -87,7 +87,7 @@ public:
   size_type size() const { return symbols_.size(); }
 
   // Look for symbol by name in this scope and host (depending on imports).
-  Symbol *FindSymbol(const SourceName &);
+  Symbol *FindSymbol(const SourceName &) const;
 
   /// Make a Symbol with unknown details.
   std::pair<iterator, bool> try_emplace(
@@ -121,7 +121,12 @@ public:
   Scope *FindSubmodule(const SourceName &) const;
   bool AddSubmodule(const SourceName &, Scope &);
 
-  DerivedTypeSpec &MakeDerivedTypeSpec(const SourceName &);
+  DeclTypeSpec &MakeNumericType(TypeCategory, int kind);
+  DeclTypeSpec &MakeLogicalType(int kind);
+  DeclTypeSpec &MakeCharacterType(ParamValue &&length, int kind = 0);
+  DeclTypeSpec &MakeDerivedType(const SourceName &);
+  DeclTypeSpec &MakeTypeStarType();
+  DeclTypeSpec &MakeClassStarType();
 
   // For modules read from module files, this is the stream of characters
   // that are referenced by SourceName objects.
@@ -135,15 +140,24 @@ public:
   // Return an error message for incompatible kinds.
   std::optional<parser::MessageFixedText> SetImportKind(ImportKind);
 
-  bool add_importName(const SourceName &);
+  void add_importName(const SourceName &);
+
+  // The range of the source of this and nested scopes.
+  const parser::CharBlock &sourceRange() const { return sourceRange_; }
+  void AddSourceRange(const parser::CharBlock &);
+  // Find the smallest scope under this one that contains source
+  const Scope *FindScope(const parser::CharBlock &) const;
 
 private:
   Scope &parent_;
   const Kind kind_;
+  parser::CharBlock sourceRange_;
   Symbol *const symbol_;
   std::list<Scope> children_;
   mapType symbols_;
   std::map<SourceName, Scope *> submodules_;
+  std::list<DeclTypeSpec> declTypeSpecs_;
+  std::list<CharacterTypeSpec> characterTypeSpecs_;
   std::list<DerivedTypeSpec> derivedTypeSpecs_;
   std::string chars_;
   std::optional<ImportKind> importKind_;
@@ -154,6 +168,7 @@ private:
   static Symbols<1024> allSymbols;
 
   bool CanImport(const SourceName &) const;
+  DeclTypeSpec &MakeLengthlessType(const DeclTypeSpec &);
 
   friend std::ostream &operator<<(std::ostream &, const Scope &);
 };

@@ -61,6 +61,7 @@ set(ERROR_TESTS
   resolve34.f90
   resolve35.f90
   resolve36.f90
+  resolve37.f90
 )
 
 # These test files have expected symbols in the source
@@ -90,6 +91,7 @@ set(MODFILE_TESTS
   modfile10.f90
   modfile11.f90
   modfile12.f90
+  modfile13.f90
 )
 
 set(LABEL_TESTS
@@ -102,6 +104,10 @@ set(DOCONCURRENT_TESTS
 
 set(CANONDO_TESTS
   canondo*.[Ff]90
+)
+
+set(FORALL_TESTS
+  forall*.[Ff]90
 )
 
 foreach(test ${ERROR_TESTS})
@@ -125,5 +131,9 @@ foreach(test ${CANONDO_TESTS})
 endforeach()
 
 foreach(test ${DOCONCURRENT_TESTS})
+  add_test(NAME ${test} COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/test_any.sh ${test})
+endforeach()
+
+foreach(test ${FORALL_TESTS})
   add_test(NAME ${test} COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/test_any.sh ${test})
 endforeach()

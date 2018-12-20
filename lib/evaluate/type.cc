@@ -25,23 +25,15 @@ using namespace std::literals::string_literals;
 namespace Fortran::evaluate {
 
 std::optional<DynamicType> GetSymbolType(const semantics::Symbol &symbol) {
-  if (auto *details{symbol.detailsIf<semantics::ObjectEntityDetails>()}) {
-    if (details->type().has_value()) {
-      switch (details->type()->category()) {
-      case semantics::DeclTypeSpec::Category::Intrinsic: {
-        TypeCategory category{details->type()->intrinsicTypeSpec().category()};
-        int kind{details->type()->intrinsicTypeSpec().kind()};
-        if (IsValidKindOfIntrinsicType(category, kind)) {
-          return std::make_optional(DynamicType{category, kind});
-        }
-        break;
+  if (const auto *type{symbol.GetType()}) {
+    if (const auto *intrinsic{type->AsIntrinsic()}) {
+      TypeCategory category{intrinsic->category()};
+      int kind{intrinsic->kind()};
+      if (IsValidKindOfIntrinsicType(category, kind)) {
+        return DynamicType{category, kind};
       }
-      case semantics::DeclTypeSpec::Category::TypeDerived:
-      case semantics::DeclTypeSpec::Category::ClassDerived:
-        return std::make_optional(DynamicType{
-            TypeCategory::Derived, 0, &details->type()->derivedTypeSpec()});
-      default:;
-      }
+    } else if (const auto *derived{type->AsDerived()}) {
+      return DynamicType{TypeCategory::Derived, 0, derived};
     }
   }
   return std::nullopt;
